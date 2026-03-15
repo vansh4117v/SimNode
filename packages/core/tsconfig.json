@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src", "composite": true },
+  "include": ["src"],
+  "references": [
+    { "path": "../clock" },
+    { "path": "../random" },
+    { "path": "../scheduler" },
+    { "path": "../http-proxy" },
+    { "path": "../tcp" },
+    { "path": "../filesystem" }
+  ]
+}
