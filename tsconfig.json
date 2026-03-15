@@ -5,6 +5,10 @@
     { "path": "packages/random" },
     { "path": "packages/http-proxy" },
     { "path": "packages/scheduler" },
-    { "path": "packages/tcp" }
+    { "path": "packages/tcp" },
+    { "path": "packages/pg-mock" },
+    { "path": "packages/redis-mock" },
+    { "path": "packages/filesystem" },
+    { "path": "packages/core" }
   ]
 }

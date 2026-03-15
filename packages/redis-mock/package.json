@@ -1,5 +1,5 @@
 {
-  "name": "@simnode/clock",
+  "name": "@simnode/redis-mock",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.cjs",

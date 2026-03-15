@@ -3,9 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "build": "npm run build --workspaces",
+    "build": "tsc --build --clean && npm run build --workspaces && tsc --build",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --build"
