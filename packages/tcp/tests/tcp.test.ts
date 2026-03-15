@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import type * as netTypes from 'node:net';
 import { TcpInterceptor, VirtualSocket, SimNodeUnmockedTCPConnectionError } from '../src/index.js';
-import { VirtualClock } from '../../clock/src/index.js';
-import { Scheduler } from '../../scheduler/src/index.js';
+import { VirtualClock } from '@simnode/clock';
+import { Scheduler } from '@simnode/scheduler';
 
 const _require = createRequire(import.meta.url);
 const net: typeof netTypes = _require('node:net');

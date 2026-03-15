@@ -70,6 +70,7 @@ export class VirtualSocket extends Duplex {
         const result = await this._handler(buf, {
           remoteHost: this.remoteAddress,
           remotePort: this.remotePort,
+          socketId: this.id,
         });
         this._emitResponse(result);
       } catch (err) {

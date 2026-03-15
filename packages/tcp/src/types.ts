@@ -27,6 +27,8 @@ export interface TcpMockContext {
   /** Remote address this socket is connected to. */
   remoteHost: string;
   remotePort: number;
+  /** Unique socket identifier for per-connection state tracking. */
+  socketId: number;
 }
 
 export type TcpHandlerResult =
