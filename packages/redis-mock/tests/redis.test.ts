@@ -1,101 +1,117 @@
-import { describe, it, expect } from 'vitest';
-import { RedisMock, SimNodeUnsupportedRedisCommand } from '../src/index.js';
-import { VirtualClock } from '@simnode/clock';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { RedisMock } from '../src/index.js';
 
-function cmd(mock: RedisMock, ...args: string[]): Buffer {
-  const handler = mock.createHandler();
-  const resp = args.map(a => `$${Buffer.byteLength(a)}\r\n${a}\r\n`).join('');
-  const full = `*${args.length}\r\n${resp}`;
-  const result = handler(Buffer.from(full), { remoteHost: 'localhost', remotePort: 6379, socketId: 0 });
-  return Buffer.isBuffer(result) ? result : Buffer.concat(result as Buffer[]);
+// Encode a RESP command buffer from string arguments
+function encode(...args: string[]): Buffer {
+  const parts = [`*${args.length}\r\n`];
+  for (const a of args) parts.push(`$${Buffer.byteLength(a)}\r\n${a}\r\n`);
+  return Buffer.from(parts.join(''));
 }
 
-describe('Redis commands', () => {
-  it('PING → PONG', () => {
-    const mock = new RedisMock();
-    expect(cmd(mock, 'PING').toString()).toBe('+PONG\r\n');
+let redisHost: string;
+let redisPort: number;
+let stopServer: () => Promise<void>;
+
+beforeAll(async () => {
+  const { RedisMemoryServer } = await import('redis-memory-server');
+  const server = new RedisMemoryServer();
+  redisHost = await server.getHost();
+  redisPort = await server.getPort();
+  stopServer = () => server.stop().then(() => {});
+}, 30_000);
+
+afterAll(async () => {
+  await stopServer();
+});
+
+describe('Redis commands (real redis-server)', () => {
+  let mock: RedisMock;
+
+  afterEach(async () => {
+    if (mock) await mock.flush();
   });
 
-  it('GET/SET', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'SET', 'key1', 'hello');
-    expect(cmd(mock, 'GET', 'key1').toString()).toContain('hello');
+  async function cmd(...args: string[]): Promise<string> {
+    const handler = mock.createHandler();
+    const ctx = { remoteHost: 'localhost', remotePort: redisPort, socketId: 1 };
+    const result = await handler(encode(...args), ctx);
+    return Buffer.isBuffer(result) ? result.toString() : '';
+  }
+
+  it('PING → PONG', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    expect(await cmd('PING')).toBe('+PONG\r\n');
   });
 
-  it('DEL', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'SET', 'k', 'v');
-    const r = cmd(mock, 'DEL', 'k');
-    expect(r.toString()).toBe(':1\r\n');
-    expect(cmd(mock, 'GET', 'k').toString()).toBe('$-1\r\n');
+  it('GET/SET', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('SET', 'key1', 'hello');
+    expect(await cmd('GET', 'key1')).toContain('hello');
   });
 
-  it('INCR/DECR', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'SET', 'counter', '10');
-    expect(cmd(mock, 'INCR', 'counter').toString()).toBe(':11\r\n');
-    expect(cmd(mock, 'DECR', 'counter').toString()).toBe(':10\r\n');
-    // INCR on non-existent key
-    expect(cmd(mock, 'INCR', 'new').toString()).toBe(':1\r\n');
+  it('DEL', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('SET', 'k', 'v');
+    expect(await cmd('DEL', 'k')).toBe(':1\r\n');
+    expect(await cmd('GET', 'k')).toBe('$-1\r\n');
   });
 
-  it('LPUSH/RPUSH/LPOP/RPOP', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'RPUSH', 'list', 'a');
-    cmd(mock, 'RPUSH', 'list', 'b');
-    cmd(mock, 'LPUSH', 'list', 'z');
-    expect(cmd(mock, 'LPOP', 'list').toString()).toContain('z');
-    expect(cmd(mock, 'RPOP', 'list').toString()).toContain('b');
+  it('INCR/DECR', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('SET', 'counter', '10');
+    expect(await cmd('INCR', 'counter')).toBe(':11\r\n');
+    expect(await cmd('DECR', 'counter')).toBe(':10\r\n');
+    expect(await cmd('INCR', 'new')).toBe(':1\r\n');
   });
 
-  it('HSET/HGET', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'HSET', 'user:1', 'name', 'Alice');
-    expect(cmd(mock, 'HGET', 'user:1', 'name').toString()).toContain('Alice');
+  it('LPUSH/RPUSH/LPOP/RPOP', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('RPUSH', 'list', 'a');
+    await cmd('RPUSH', 'list', 'b');
+    await cmd('LPUSH', 'list', 'z');
+    expect(await cmd('LPOP', 'list')).toContain('z');
+    expect(await cmd('RPOP', 'list')).toContain('b');
   });
 
-  it('SADD/SMEMBERS', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'SADD', 'myset', 'a');
-    cmd(mock, 'SADD', 'myset', 'b');
-    cmd(mock, 'SADD', 'myset', 'a'); // duplicate
-    const r = cmd(mock, 'SMEMBERS', 'myset').toString();
+  it('HSET/HGET', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('HSET', 'user:1', 'name', 'Alice');
+    expect(await cmd('HGET', 'user:1', 'name')).toContain('Alice');
+  });
+
+  it('SADD/SMEMBERS', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('SADD', 'myset', 'a');
+    await cmd('SADD', 'myset', 'b');
+    await cmd('SADD', 'myset', 'a'); // duplicate
+    const r = await cmd('SMEMBERS', 'myset');
     expect(r).toContain('a');
     expect(r).toContain('b');
   });
 
-  it('ZADD/ZRANGE', () => {
-    const mock = new RedisMock();
-    cmd(mock, 'ZADD', 'zs', '1', 'alice', '2', 'bob', '0.5', 'charlie');
-    const r = cmd(mock, 'ZRANGE', 'zs', '0', '-1').toString();
+  it('ZADD/ZRANGE', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('ZADD', 'zs', '1', 'alice', '2', 'bob', '0.5', 'charlie');
+    const r = await cmd('ZRANGE', 'zs', '0', '-1');
     expect(r).toContain('charlie');
     expect(r).toContain('alice');
     expect(r).toContain('bob');
   });
 
-  it('EXPIRE/TTL with virtual clock', () => {
-    const clock = new VirtualClock(0);
-    const mock = new RedisMock({ clock });
-    cmd(mock, 'SET', 'k', 'v');
-    cmd(mock, 'EXPIRE', 'k', '10');
-    expect(cmd(mock, 'TTL', 'k').toString()).toBe(':10\r\n');
-    clock.advance(5000);
-    expect(cmd(mock, 'TTL', 'k').toString()).toBe(':5\r\n');
-    clock.advance(5000);
-    // Key expired
-    expect(cmd(mock, 'GET', 'k').toString()).toBe('$-1\r\n');
+  it('EXPIRE/TTL with real redis', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
+    await cmd('SET', 'k', 'v');
+    await cmd('EXPIRE', 'k', '10');
+    const ttl = await cmd('TTL', 'k');
+    // TTL should be close to 10 (real time)
+    const ttlVal = parseInt(ttl.replace(':', '').trim());
+    expect(ttlVal).toBeGreaterThanOrEqual(9);
+    expect(ttlVal).toBeLessThanOrEqual(10);
   });
 
-  it('seedData', () => {
-    const mock = new RedisMock();
+  it('seedData', async () => {
+    mock = new RedisMock({ redisHost, redisPort });
     mock.seedData('greeting', 'hello');
-    expect(cmd(mock, 'GET', 'greeting').toString()).toContain('hello');
-  });
-
-  it('unsupported command throws', () => {
-    const mock = new RedisMock();
-    const handler = mock.createHandler();
-    expect(() => handler(Buffer.from('*1\r\n$4\r\nEVAL\r\n'), { remoteHost: 'localhost', remotePort: 6379, socketId: 0 }))
-      .toThrow(SimNodeUnsupportedRedisCommand);
+    expect(await cmd('GET', 'greeting')).toContain('hello');
   });
 });

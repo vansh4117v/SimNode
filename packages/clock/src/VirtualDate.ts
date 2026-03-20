@@ -32,6 +32,10 @@ export function createVirtualDate(clock: VirtualClock): DateConstructor {
     static override now(): number {
       return clock.now();
     }
+
+    static [Symbol.hasInstance](instance: unknown): boolean {
+      return instance instanceof OrigDate;
+    }
   }
 
   return VirtualDate as unknown as DateConstructor;

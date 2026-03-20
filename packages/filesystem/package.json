@@ -18,5 +18,8 @@
   "scripts": {
     "build": "tsup",
     "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "memfs": "^4.56.11"
   }
 }

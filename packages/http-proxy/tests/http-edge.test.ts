@@ -43,6 +43,7 @@ describe('concurrent requests', () => {
       status: 200,
       body: { ok: true },
       latency: 100,
+      match: 'prefix',
     });
     interceptor.install();
 
@@ -64,8 +65,8 @@ describe('concurrent requests', () => {
   it('different latencies resolve at correct virtual times', async () => {
     const clock = new VirtualClock(0);
     interceptor = new HttpInterceptor({ clock });
-    interceptor.mock('http://fast.test.com/', { status: 200, body: 'fast', latency: 50 });
-    interceptor.mock('http://slow.test.com/', { status: 200, body: 'slow', latency: 200 });
+    interceptor.mock('http://fast.test.com/', { status: 200, body: 'fast', latency: 50, match: 'prefix' });
+    interceptor.mock('http://slow.test.com/', { status: 200, body: 'slow', latency: 200, match: 'prefix' });
     interceptor.install();
 
     let fastDone = false;
@@ -92,6 +93,7 @@ describe('dynamic handler', () => {
   it('receives request body and URL', async () => {
     interceptor = new HttpInterceptor();
     interceptor.mock('http://echo.test.com/', {
+      match: 'prefix',
       handler: (call) => ({
         status: 200,
         body: { echoed: call.body, method: call.method, url: call.url },
@@ -112,7 +114,7 @@ describe('dynamic handler', () => {
 describe('call filtering', () => {
   it('filters by method', async () => {
     interceptor = new HttpInterceptor();
-    interceptor.mock('http://api.test.com/', { status: 200, body: 'ok' });
+    interceptor.mock('http://api.test.com/', { status: 200, body: 'ok', match: 'prefix' });
     interceptor.install();
 
     await request('http://api.test.com/a', 'GET');
@@ -126,8 +128,8 @@ describe('call filtering', () => {
 
   it('filters by URL prefix', async () => {
     interceptor = new HttpInterceptor();
-    interceptor.mock('http://a.test.com/', { status: 200, body: 'a' });
-    interceptor.mock('http://b.test.com/', { status: 200, body: 'b' });
+    interceptor.mock('http://a.test.com/', { status: 200, body: 'a', match: 'prefix' });
+    interceptor.mock('http://b.test.com/', { status: 200, body: 'b', match: 'prefix' });
     interceptor.install();
 
     await request('http://a.test.com/1');
@@ -157,7 +159,7 @@ describe('no real network', () => {
 describe('reset', () => {
   it('clears all mocks and recorded calls', async () => {
     interceptor = new HttpInterceptor();
-    interceptor.mock('http://api.test.com/', { status: 200, body: 'ok' });
+    interceptor.mock('http://api.test.com/', { status: 200, body: 'ok', match: 'prefix' });
     interceptor.install();
 
     await request('http://api.test.com/');

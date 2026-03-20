@@ -8,6 +8,9 @@
     { "path": "../scheduler" },
     { "path": "../http-proxy" },
     { "path": "../tcp" },
+    { "path": "../mongo" },
+    { "path": "../pg-mock" },
+    { "path": "../redis-mock" },
     { "path": "../filesystem" }
   ]
 }

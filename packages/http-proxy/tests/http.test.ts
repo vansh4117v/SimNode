@@ -33,7 +33,7 @@ describe('HttpInterceptor — static mocks', () => {
 
   it('records all calls', async () => {
     interceptor = new HttpInterceptor();
-    interceptor.mock('http://api.example.com/', { status: 200, body: 'ok' });
+    interceptor.mock('http://api.example.com/', { status: 200, body: 'ok', match: 'prefix' });
     interceptor.install();
 
     await request('http://api.example.com/a');

@@ -1,54 +1,117 @@
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { normalizePath } from './internalPaths.js';
+import { Volume, createFsFromVolume } from 'memfs';
 
 const _require = createRequire(import.meta.url);
 const fsCjs = _require('node:fs') as typeof import('node:fs');
 
-interface VFSEntry { content: Buffer; isDir: boolean }
 interface InjectedError { error: string; code: string; after?: number }
-
-interface FileDescriptor {
-  id: number;
-  normPath: string;
-  position: number;
-  flags: string;
-}
 
 /** Minimal virtual clock interface for stat timestamps. */
 interface IClock { now(): number; }
 
 export class VirtualFS {
-  private _store = new Map<string, VFSEntry>();
+  private _vol = new Volume();
   private _injections = new Map<string, InjectedError>();
-  private _originals: Record<string, unknown> = {};
   private _writeCount = new Map<string, number>();
-
-  private _fdTable = new Map<number, FileDescriptor>();
-  private _nextFd = 1000;
-
+  private _originals: Record<string, unknown> = {};
+  private _promiseOriginals: Record<string, unknown> = {};
   private readonly _clock?: IClock;
 
   constructor(opts?: { clock?: IClock }) {
     this._clock = opts?.clock;
   }
 
+  // ── public API (unchanged) ──────────────────────────────────────────────
+
   seed(files: Record<string, string | Buffer>): void {
     for (const [p, content] of Object.entries(files)) {
       const norm = normalizePath(p);
-      this._store.set(norm, { content: Buffer.isBuffer(content) ? content : Buffer.from(content), isDir: false });
       // Ensure parent dirs exist
-      let dir = path.dirname(norm);
-      while (dir && dir !== path.dirname(dir)) {
-        if (!this._store.has(dir)) this._store.set(dir, { content: Buffer.alloc(0), isDir: true });
-        dir = path.dirname(dir);
-      }
+      const dir = path.dirname(norm);
+      this._vol.mkdirSync(dir, { recursive: true });
+      this._vol.writeFileSync(norm, Buffer.isBuffer(content) ? content : Buffer.from(content));
     }
   }
 
   inject(filePath: string, opts: { error: string; code?: string; after?: number }): void {
     this._injections.set(normalizePath(filePath), { error: opts.error, code: opts.code ?? 'EIO', after: opts.after });
   }
+
+  // ── install / uninstall ─────────────────────────────────────────────────
+
+  install(): void {
+    const memFsCjs = createFsFromVolume(this._vol) as any;
+
+    // Snapshot every writable property on the real fs module
+    for (const key of Object.keys(fsCjs)) {
+      if (key === 'promises') continue;
+      const desc = Object.getOwnPropertyDescriptor(fsCjs, key);
+      if (desc && (desc.writable || desc.set || desc.configurable)) {
+        this._originals[key] = (fsCjs as any)[key];
+      }
+    }
+
+    // Snapshot promises sub-object
+    if (fsCjs.promises) {
+      for (const key of Object.keys(fsCjs.promises)) {
+        const desc = Object.getOwnPropertyDescriptor(fsCjs.promises, key);
+        if (desc && (desc.writable || desc.set || desc.configurable)) {
+          this._promiseOriginals[key] = (fsCjs.promises as any)[key];
+        }
+      }
+    }
+
+    // Overwrite fs properties with memfs counterparts (skip non-writable)
+    for (const key of Object.keys(memFsCjs)) {
+      if (key === 'promises') continue;
+      if (typeof memFsCjs[key] !== 'function') continue;
+      if (!(key in this._originals)) continue; // skip if we couldn't snapshot it
+      try { (fsCjs as any)[key] = memFsCjs[key]; } catch { /* skip read-only */ }
+    }
+
+    // Overwrite fs.promises
+    if (fsCjs.promises && memFsCjs.promises) {
+      for (const key of Object.keys(memFsCjs.promises)) {
+        if (!(key in this._promiseOriginals)) continue;
+        try { (fsCjs.promises as any)[key] = memFsCjs.promises[key]; } catch { /* skip read-only */ }
+      }
+    }
+
+    // Wrap path-accepting functions with normalization + injection checks
+    this._wrapInjections();
+    this._wrapPathNormalization();
+  }
+
+  uninstall(): void {
+    for (const [key, orig] of Object.entries(this._originals)) {
+      try { (fsCjs as any)[key] = orig; } catch { /* skip read-only */ }
+    }
+    if (fsCjs.promises) {
+      for (const [key, orig] of Object.entries(this._promiseOriginals)) {
+        try { (fsCjs.promises as any)[key] = orig; } catch { /* skip read-only */ }
+      }
+    }
+    this._originals = {};
+    this._promiseOriginals = {};
+  }
+
+  reset(): void {
+    // Recreate volume (clears all data)
+    const wasInstalled = Object.keys(this._originals).length > 0;
+    this._vol = new Volume();
+    this._injections.clear();
+    this._writeCount.clear();
+    // If currently installed, re-install to pick up new volume
+    if (wasInstalled) {
+      // Restore originals first so install() snapshots correctly
+      this.uninstall();
+      this.install();
+    }
+  }
+
+  // ── private ─────────────────────────────────────────────────────────────
 
   private _checkInjection(p: string, op: 'read' | 'write'): void {
     const norm = normalizePath(p);
@@ -65,417 +128,206 @@ export class VirtualFS {
     throw err;
   }
 
-  private _clockNow(): number {
-    return this._clock?.now() ?? 0;
-  }
+  /**
+   * Wrap common path-accepting fs functions with normalizePath()
+   * so that Windows-style backslash paths work with memfs.
+   */
+  private _wrapPathNormalization(): void {
+    const originals = this._originals;
 
-  private _getStat(norm: string) {
-      const entry = this._store.get(norm);
-      if (!entry) {
-        const err = new Error(`ENOENT: no such file or directory, stat '${norm}'`) as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        throw err;
+    // Helper: normalize + fallback to real fs on ENOENT for read-only sync ops
+    const wrapReadSync = (memFn: Function, realFn: Function | undefined) => function (p: any, ...args: any[]) {
+      const norm = (typeof p === 'string') ? normalizePath(p) : p;
+      try {
+        return memFn(norm, ...args);
+      } catch (e: any) {
+        if (e?.code === 'ENOENT' && realFn) return realFn(p, ...args);
+        throw e;
       }
-      const ts = this._clockNow();
-      const d = new Date(ts);
-      return {
-        isFile: () => !entry.isDir,
-        isDirectory: () => entry.isDir,
-        isSymbolicLink: () => false,
-        size: entry.content.length,
-        mtimeMs: ts,
-        mtime: d,
-        atimeMs: ts,
-        atime: d,
-        ctimeMs: ts,
-        ctime: d,
-        birthtimeMs: ts,
-        birthtime: d,
-        mode: entry.isDir ? 0o755 : 0o644,
-        nlink: 1,
-        uid: 0,
-        gid: 0,
-        dev: 1,
-        ino: 0,
-        rdev: 0,
-        blksize: 4096,
-        blocks: Math.ceil(entry.content.length / 512),
+    };
+    // Normalize only (write ops — no fallback)
+    const wrapWrite = (fn: Function) => function (p: any, ...args: any[]) {
+      const norm = (typeof p === 'string') ? normalizePath(p) : p;
+      return fn(norm, ...args);
+    };
+    const wrap2 = (fn: Function) => function (p1: any, p2: any, ...args: any[]) {
+      const n1 = (typeof p1 === 'string') ? normalizePath(p1) : p1;
+      const n2 = (typeof p2 === 'string') ? normalizePath(p2) : p2;
+      return fn(n1, n2, ...args);
+    };
+
+    // Read-only sync ops: normalize + fallback to real fs
+    const readSyncNames = ['statSync', 'lstatSync', 'accessSync', 'readdirSync'] as const;
+    for (const name of readSyncNames) {
+      const memFn = (fsCjs as any)[name];
+      if (typeof memFn === 'function') {
+        (fsCjs as any)[name] = wrapReadSync(memFn, originals[name] as Function | undefined);
+      }
+    }
+
+    // existsSync: special — returns false instead of throwing
+    const memExistsSync = (fsCjs as any).existsSync;
+    const realExistsSync = originals['existsSync'] as Function | undefined;
+    if (typeof memExistsSync === 'function') {
+      (fsCjs as any).existsSync = function (p: any) {
+        const norm = (typeof p === 'string') ? normalizePath(p) : p;
+        const memResult = memExistsSync(norm);
+        if (memResult) return true;
+        return realExistsSync ? realExistsSync(p) : false;
       };
+    }
+
+    // Write-only sync ops: normalize only
+    const writeSyncNames = ['unlinkSync', 'mkdirSync', 'chmodSync', 'rmSync', 'rmdirSync'] as const;
+    for (const name of writeSyncNames) {
+      const memFn = (fsCjs as any)[name];
+      if (typeof memFn === 'function') (fsCjs as any)[name] = wrapWrite(memFn);
+    }
+    const origRenameSync = (fsCjs as any).renameSync;
+    if (typeof origRenameSync === 'function') (fsCjs as any).renameSync = wrap2(origRenameSync);
+
+    // Async callback variants: read ops with fallback
+    const readAsyncNames = ['stat', 'lstat', 'access', 'readdir'] as const;
+    for (const name of readAsyncNames) {
+      const memFn = (fsCjs as any)[name];
+      const realFn = originals[name] as Function | undefined;
+      if (typeof memFn === 'function') {
+        (fsCjs as any)[name] = function (p: any, ...args: any[]) {
+          const norm = (typeof p === 'string') ? normalizePath(p) : p;
+          const cb = args[args.length - 1];
+          const innerArgs = args.slice(0, -1);
+          memFn(norm, ...innerArgs, (err: any, ...results: any[]) => {
+            if (err?.code === 'ENOENT' && realFn) return realFn(p, ...args);
+            cb(err, ...results);
+          });
+        };
+      }
+    }
+
+    // Async callback variants: write ops (normalize only)
+    const writeAsyncNames = ['unlink', 'mkdir', 'chmod', 'rm', 'rmdir'] as const;
+    for (const name of writeAsyncNames) {
+      const memFn = (fsCjs as any)[name];
+      if (typeof memFn === 'function') (fsCjs as any)[name] = wrapWrite(memFn);
+    }
+    const origRename = (fsCjs as any).rename;
+    if (typeof origRename === 'function') (fsCjs as any).rename = wrap2(origRename);
   }
 
-  install(): void {
+  /**
+   * Wrap the already-installed memfs readFileSync / writeFileSync /
+   * appendFileSync with injection-check proxies so that inject() works.
+   */
+  private _wrapInjections(): void {
     const self = this;
+    const memReadFileSync = (fsCjs as any).readFileSync;
+    const memWriteFileSync = (fsCjs as any).writeFileSync;
+    const memAppendFileSync = (fsCjs as any).appendFileSync;
 
-    // Save originals
-    const origNames = [
-      'readFileSync', 'writeFileSync', 'appendFileSync',
-      'existsSync', 'mkdirSync', 'readdirSync',
-      'unlinkSync', 'statSync', 'openSync', 'closeSync',
-      'fstatSync', 'readSync', 'writeSync',
-      'accessSync', 'renameSync', 'chmodSync',
-      'readFile', 'writeFile', 'appendFile',
-      'open', 'close', 'fstat', 'stat',
-      'access', 'rename', 'chmod',
-    ];
-    for (const k of origNames) {
-        if (k in fsCjs) this._originals[k] = (fsCjs as any)[k];
-    }
+    const realReadFileSync = self._originals['readFileSync'] as Function | undefined;
+    (fsCjs as any).readFileSync = function (p: any, opts?: any) {
+      const norm = (typeof p === 'string') ? normalizePath(p) : p;
+      if (typeof p === 'string') self._checkInjection(String(p), 'read');
+      try {
+        return memReadFileSync(norm, opts);
+      } catch (e: any) {
+        if (e?.code === 'ENOENT' && realReadFileSync) return realReadFileSync(p, opts);
+        throw e;
+      }
+    };
 
+    (fsCjs as any).writeFileSync = function (p: any, data: any, opts?: any) {
+      const norm = (typeof p === 'string') ? normalizePath(p) : p;
+      if (typeof p === 'string') self._checkInjection(String(p), 'write');
+      // Auto-create parent dirs (memfs requires them to exist)
+      if (typeof norm === 'string') {
+        const dir = path.dirname(norm);
+        try { self._vol.mkdirSync(dir, { recursive: true }); } catch { /* already exists */ }
+      }
+      return memWriteFileSync(norm, data, opts);
+    };
+
+    (fsCjs as any).appendFileSync = function (p: any, data: any, opts?: any) {
+      const norm = (typeof p === 'string') ? normalizePath(p) : p;
+      if (typeof p === 'string') self._checkInjection(String(p), 'write');
+      if (typeof norm === 'string') {
+        const dir = path.dirname(norm);
+        try { self._vol.mkdirSync(dir, { recursive: true }); } catch { /* already exists */ }
+      }
+      return memAppendFileSync(norm, data, opts);
+    };
+
+    // Also wrap async readFile / writeFile so injection checks apply
+    const memReadFile = (fsCjs as any).readFile;
+    const memWriteFile = (fsCjs as any).writeFile;
+    const memAppendFile = (fsCjs as any).appendFile;
+
+    const realReadFile = self._originals['readFile'] as Function | undefined;
+    (fsCjs as any).readFile = function (p: any, ...args: any[]) {
+      if (typeof p === 'string' || (p instanceof URL) || Buffer.isBuffer(p)) {
+        try { self._checkInjection(String(p), 'read'); }
+        catch (e) { const cb = args[args.length - 1]; if (typeof cb === 'function') return cb(e); throw e; }
+      }
+      const norm = (typeof p === 'string') ? normalizePath(p) : p;
+      const cb = args[args.length - 1];
+      const innerArgs = args.slice(0, -1);
+      memReadFile(norm, ...innerArgs, (err: any, ...results: any[]) => {
+        if (err?.code === 'ENOENT' && realReadFile) return realReadFile(p, ...args);
+        if (typeof cb === 'function') cb(err, ...results);
+      });
+    };
+
+    (fsCjs as any).writeFile = function (p: any, data: any, ...args: any[]) {
+      if (typeof p === 'string' || (p instanceof URL) || Buffer.isBuffer(p)) {
+        try { self._checkInjection(String(p), 'write'); }
+        catch (e) { const cb = args[args.length - 1]; if (typeof cb === 'function') return cb(e); throw e; }
+      }
+      return memWriteFile(p, data, ...args);
+    };
+
+    (fsCjs as any).appendFile = function (p: any, data: any, ...args: any[]) {
+      if (typeof p === 'string' || (p instanceof URL) || Buffer.isBuffer(p)) {
+        try { self._checkInjection(String(p), 'write'); }
+        catch (e) { const cb = args[args.length - 1]; if (typeof cb === 'function') return cb(e); throw e; }
+      }
+      return memAppendFile(p, data, ...args);
+    };
+
+    // Wrap promises for injection checks
     if (fsCjs.promises) {
-        this._originals['promises.readFile'] = fsCjs.promises.readFile;
-        this._originals['promises.writeFile'] = fsCjs.promises.writeFile;
-        this._originals['promises.appendFile'] = (fsCjs.promises as any).appendFile;
-        this._originals['promises.open'] = fsCjs.promises.open;
-        this._originals['promises.stat'] = fsCjs.promises.stat;
-        this._originals['promises.access'] = (fsCjs.promises as any).access;
-        this._originals['promises.rename'] = (fsCjs.promises as any).rename;
-        this._originals['promises.chmod'] = (fsCjs.promises as any).chmod;
+      const memPReadFile = (fsCjs.promises as any).readFile;
+      const memPWriteFile = (fsCjs.promises as any).writeFile;
+      const memPAppendFile = (fsCjs.promises as any).appendFile;
+
+      const realPReadFile = self._promiseOriginals['readFile'] as Function | undefined;
+      (fsCjs.promises as any).readFile = async (p: any, opts?: any) => {
+        if (typeof p === 'string' || (p instanceof URL) || Buffer.isBuffer(p)) {
+          self._checkInjection(String(p), 'read');
+        }
+        const norm = (typeof p === 'string') ? normalizePath(p) : p;
+        try {
+          return await memPReadFile(norm, opts);
+        } catch (e: any) {
+          if (e?.code === 'ENOENT' && realPReadFile) return realPReadFile(p, opts);
+          throw e;
+        }
+      };
+
+      (fsCjs.promises as any).writeFile = (p: any, data: any, opts?: any) => {
+        if (typeof p === 'string' || (p instanceof URL) || Buffer.isBuffer(p)) {
+          try { self._checkInjection(String(p), 'write'); }
+          catch (e) { return Promise.reject(e); }
+        }
+        return memPWriteFile(p, data, opts);
+      };
+
+      (fsCjs.promises as any).appendFile = (p: any, data: any, opts?: any) => {
+        if (typeof p === 'string' || (p instanceof URL) || Buffer.isBuffer(p)) {
+          try { self._checkInjection(String(p), 'write'); }
+          catch (e) { return Promise.reject(e); }
+        }
+        return memPAppendFile(p, data, opts);
+      };
     }
-
-    // --- SYNC VARIANTS --- //
-
-    (fsCjs as any).readFileSync = function (p: string | Buffer | URL | number, opts?: any): string | Buffer {
-      if (typeof p === 'number') {
-        const fd = self._fdTable.get(p);
-        if (!fd) throw new Error('EBADF: bad file descriptor');
-        p = fd.normPath;
-      }
-      const norm = normalizePath(String(p));
-      self._checkInjection(norm, 'read');
-      const entry = self._store.get(norm);
-      if (!entry || entry.isDir) {
-        const err = new Error(`ENOENT: no such file: '${p}'`) as NodeJS.ErrnoException;
-        err.code = 'ENOENT'; throw err;
-      }
-      if (opts?.encoding || typeof opts === 'string') return entry.content.toString(typeof opts === 'string' ? opts : opts.encoding);
-      return Buffer.from(entry.content);
-    };
-
-    (fsCjs as any).writeFileSync = function (p: string | Buffer | URL | number, data: string | Buffer): void {
-      if (typeof p === 'number') {
-        const fd = self._fdTable.get(p);
-        if (!fd) throw new Error('EBADF: bad file descriptor');
-        p = fd.normPath;
-      }
-      const norm = normalizePath(String(p));
-      self._checkInjection(norm, 'write');
-      self._store.set(norm, { content: Buffer.isBuffer(data) ? data : Buffer.from(data), isDir: false });
-    };
-
-    (fsCjs as any).appendFileSync = function (p: string | Buffer | URL | number, data: string | Buffer, _opts?: any): void {
-      if (typeof p === 'number') {
-        const fd = self._fdTable.get(p);
-        if (!fd) throw new Error('EBADF: bad file descriptor');
-        p = fd.normPath;
-      }
-      const norm = normalizePath(String(p));
-      self._checkInjection(norm, 'write');
-      const existing = self._store.get(norm);
-      const existing_content = (existing && !existing.isDir) ? existing.content : Buffer.alloc(0);
-      const newData = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      self._store.set(norm, { content: Buffer.concat([existing_content, newData]), isDir: false });
-    };
-
-    (fsCjs as any).existsSync = function (p: string): boolean {
-      return self._store.has(normalizePath(String(p)));
-    };
-
-    (fsCjs as any).mkdirSync = function (p: string, opts?: any): void {
-      const norm = normalizePath(String(p));
-      if (opts?.recursive) {
-        // Create all parent directories
-        let dir = norm;
-        const dirs: string[] = [];
-        while (dir && dir !== path.dirname(dir)) {
-          dirs.unshift(dir);
-          dir = path.dirname(dir);
-        }
-        for (const d of dirs) {
-          if (!self._store.has(d)) self._store.set(d, { content: Buffer.alloc(0), isDir: true });
-        }
-      } else {
-        self._store.set(norm, { content: Buffer.alloc(0), isDir: true });
-      }
-    };
-
-    (fsCjs as any).readdirSync = function (p: string): string[] {
-      const norm = normalizePath(String(p));
-      const result: string[] = [];
-      for (const key of self._store.keys()) {
-        if (path.dirname(key) === norm && key !== norm) result.push(path.basename(key));
-      }
-      return result;
-    };
-
-    (fsCjs as any).unlinkSync = function (p: string): void {
-      const norm = normalizePath(String(p));
-      if (!self._store.delete(norm)) {
-        const err = new Error(`ENOENT: '${p}'`) as NodeJS.ErrnoException;
-        err.code = 'ENOENT'; throw err;
-      }
-    };
-
-    (fsCjs as any).statSync = function (p: string): any {
-      const norm = normalizePath(String(p));
-      return self._getStat(norm);
-    };
-
-    (fsCjs as any).accessSync = function (p: string, _mode?: number): void {
-      const norm = normalizePath(String(p));
-      if (!self._store.has(norm)) {
-        const err = new Error(`ENOENT: no such file or directory, access '${p}'`) as NodeJS.ErrnoException;
-        err.code = 'ENOENT'; throw err;
-      }
-      // No permission model — always accessible
-    };
-
-    (fsCjs as any).renameSync = function (oldPath: string, newPath: string): void {
-      const oldNorm = normalizePath(String(oldPath));
-      const newNorm = normalizePath(String(newPath));
-      const entry = self._store.get(oldNorm);
-      if (!entry) {
-        const err = new Error(`ENOENT: no such file or directory, rename '${oldPath}' -> '${newPath}'`) as NodeJS.ErrnoException;
-        err.code = 'ENOENT'; throw err;
-      }
-      self._store.delete(oldNorm);
-      self._store.set(newNorm, entry);
-    };
-
-    (fsCjs as any).chmodSync = function (_p: string, _mode: string | number): void {
-      // Virtual FS has no permission model — no-op
-    };
-
-    // FD table abstractions
-    (fsCjs as any).openSync = function (p: string, flags: string, mode?: any): number {
-        const norm = normalizePath(String(p));
-        const entry = self._store.get(norm);
-
-        const isWrite = flags.includes('w') || flags.includes('a');
-
-        if (!entry && !isWrite) {
-            const err = new Error(`ENOENT: no such file or directory, open '${p}'`) as NodeJS.ErrnoException;
-            err.code = 'ENOENT'; throw err;
-        }
-
-        if (!entry && isWrite) {
-            self._store.set(norm, { content: Buffer.alloc(0), isDir: false });
-        } else if (entry && flags.includes('w')) {
-            // truncate
-            entry.content = Buffer.alloc(0);
-        }
-
-        const fd = self._nextFd++;
-        self._fdTable.set(fd, { id: fd, normPath: norm, position: 0, flags });
-        return fd;
-    };
-
-    (fsCjs as any).closeSync = function (fd: number): void {
-        if (!self._fdTable.has(fd)) {
-            const err = new Error(`EBADF: bad file descriptor, close`) as NodeJS.ErrnoException;
-            err.code = 'EBADF'; throw err;
-        }
-        self._fdTable.delete(fd);
-    };
-
-    (fsCjs as any).fstatSync = function (fd: number): any {
-        const fdObj = self._fdTable.get(fd);
-        if (!fdObj) {
-           const err = new Error(`EBADF: bad file descriptor, fstat`) as NodeJS.ErrnoException;
-           err.code = 'EBADF'; throw err;
-        }
-        return self._getStat(fdObj.normPath);
-    };
-
-    // --- CALLBACK VARIANTS --- //
-
-    (fsCjs as any).readFile = function (p: any, opts: any, cb: any): void {
-        const callback = cb || opts;
-        const options = typeof opts === 'function' ? null : opts;
-        queueMicrotask(() => {
-            try {
-                const res = fsCjs.readFileSync(p, options);
-                callback(null, res);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).writeFile = function (p: any, data: any, opts: any, cb: any): void {
-        const callback = cb || opts;
-        queueMicrotask(() => {
-            try {
-                fsCjs.writeFileSync(p, data);
-                callback(null);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).appendFile = function (p: any, data: any, opts: any, cb: any): void {
-        const callback = cb || opts;
-        queueMicrotask(() => {
-            try {
-                (fsCjs as any).appendFileSync(p, data);
-                callback(null);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).stat = function (p: any, opts: any, cb: any): void {
-        const callback = cb || opts;
-        queueMicrotask(() => {
-            try {
-                const res = fsCjs.statSync(p);
-                callback(null, res);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).open = function (p: any, flags: any, mode: any, cb: any): void {
-        const callback = cb || mode || flags;
-        const f = typeof flags === 'function' ? 'r' : flags;
-        queueMicrotask(() => {
-            try {
-                const res = fsCjs.openSync(p, f);
-                callback(null, res);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).close = function (fd: number, cb: any): void {
-         queueMicrotask(() => {
-          try {
-              fsCjs.closeSync(fd);
-              if (cb) cb(null);
-          } catch(e) {
-              if (cb) cb(e);
-          }
-       });
-    };
-
-    (fsCjs as any).fstat = function (fd: number, opts: any, cb: any): void {
-        const callback = cb || opts;
-        queueMicrotask(() => {
-            try {
-                const res = fsCjs.fstatSync(fd);
-                callback(null, res);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).access = function (p: any, mode: any, cb: any): void {
-        const callback = cb || mode;
-        queueMicrotask(() => {
-            try {
-                (fsCjs as any).accessSync(p);
-                callback(null);
-            } catch(e) {
-                callback(e);
-            }
-        });
-    };
-
-    (fsCjs as any).rename = function (oldPath: any, newPath: any, cb: any): void {
-        queueMicrotask(() => {
-            try {
-                (fsCjs as any).renameSync(oldPath, newPath);
-                cb(null);
-            } catch(e) {
-                cb(e);
-            }
-        });
-    };
-
-    (fsCjs as any).chmod = function (p: any, mode: any, cb: any): void {
-        queueMicrotask(() => {
-            cb(null); // no-op
-        });
-    };
-
-    // --- PROMISES --- //
-
-    if (fsCjs.promises) {
-        (fsCjs.promises as any).readFile = function(p: any, opts: any) {
-            return new Promise((resolve, reject) => {
-                fsCjs.readFile(p, opts, (err: any, data: any) => err ? reject(err) : resolve(data));
-            });
-        };
-        (fsCjs.promises as any).writeFile = function(p: any, data: any, opts: any) {
-            return new Promise((resolve, reject) => {
-                fsCjs.writeFile(p, data, opts, (err: any) => err ? reject(err) : resolve(undefined));
-            });
-        };
-        (fsCjs.promises as any).appendFile = function(p: any, data: any, opts: any) {
-            return new Promise((resolve, reject) => {
-                (fsCjs as any).appendFile(p, data, opts, (err: any) => err ? reject(err) : resolve(undefined));
-            });
-        };
-        (fsCjs.promises as any).stat = function(p: any, opts?: any) {
-            return new Promise((resolve, reject) => {
-                fsCjs.stat(p, opts, (err: any, data: any) => err ? reject(err) : resolve(data));
-            });
-        };
-        (fsCjs.promises as any).access = function(p: any, mode?: any) {
-            return new Promise((resolve, reject) => {
-                (fsCjs as any).access(p, mode, (err: any) => err ? reject(err) : resolve(undefined));
-            });
-        };
-        (fsCjs.promises as any).rename = function(oldPath: any, newPath: any) {
-            return new Promise((resolve, reject) => {
-                (fsCjs as any).rename(oldPath, newPath, (err: any) => err ? reject(err) : resolve(undefined));
-            });
-        };
-        (fsCjs.promises as any).chmod = function(p: any, mode: any) {
-            return new Promise<void>((resolve) => {
-                resolve(undefined); // no-op
-            });
-        };
-        (fsCjs.promises as any).open = function(p: any, flags: any, mode?: any) {
-            return new Promise((resolve, reject) => {
-                fsCjs.open(p, flags, mode, (err: any, fd: any) => {
-                    if (err) return reject(err);
-
-                    // Return a FileHandle mock
-                    resolve({
-                        fd,
-                        stat: () => fsCjs.promises.stat(p),
-                        readFile: (opts: any) => fsCjs.promises.readFile(fd, opts),
-                        writeFile: (data: any, opts: any) => fsCjs.promises.writeFile(fd, data, opts),
-                        appendFile: (data: any, opts: any) => (fsCjs.promises as any).appendFile(fd, data, opts),
-                        close: () => new Promise<void>((r, rj) => fsCjs.close(fd, (ce: any) => ce ? rj(ce) : r())),
-                    });
-                });
-            });
-        };
-    }
-  }
-
-  uninstall(): void {
-    for (const [name, orig] of Object.entries(this._originals)) {
-        if (name.startsWith('promises.')) {
-            if (fsCjs.promises) (fsCjs.promises as any)[name.replace('promises.', '')] = orig;
-        } else {
-            (fsCjs as any)[name] = orig;
-        }
-    }
-    this._originals = {};
-  }
-
-  reset(): void {
-    this._store.clear();
-    this._injections.clear();
-    this._writeCount.clear();
-    this._fdTable.clear();
-    this._nextFd = 1000;
   }
 }

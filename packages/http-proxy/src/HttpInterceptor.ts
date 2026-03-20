@@ -24,6 +24,13 @@ export interface MockResponseConfig {
   latency?: number;
   /** Dynamic handler — overrides static body/status when provided. */
   handler?: (call: RecordedCall) => { status: number; body?: unknown; headers?: Record<string, string> };
+  /**
+   * URL match mode.
+   * - `'exact'`  (default): `url === urlPattern` — only matches the exact URL.
+   * - `'prefix'`: `url.startsWith(urlPattern)` — matches any URL that begins with the pattern.
+   * - `'regex'`:  `new RegExp(urlPattern).test(url)` — matches via regular expression.
+   */
+  match?: 'exact' | 'prefix' | 'regex';
 }
 
 export interface FailConfig {
@@ -98,15 +105,26 @@ class FakeClientRequest extends EventEmitter {
 class MockRoute {
   readonly calls: RecordedCall[] = [];
   private _callCount = 0;
+  private readonly _matchMode: 'exact' | 'prefix' | 'regex';
+  private readonly _regex?: RegExp;
 
   constructor(
-    readonly urlPrefix: string,
+    readonly urlPattern: string,
     readonly config: MockResponseConfig,
     readonly failConfig?: FailConfig,
-  ) {}
+  ) {
+    this._matchMode = config.match ?? 'exact';
+    if (this._matchMode === 'regex') {
+      this._regex = new RegExp(urlPattern);
+    }
+  }
 
   matches(url: string): boolean {
-    return url.startsWith(this.urlPrefix);
+    switch (this._matchMode) {
+      case 'exact':  return url === this.urlPattern;
+      case 'prefix': return url.startsWith(this.urlPattern);
+      case 'regex':  return this._regex!.test(url);
+    }
   }
 
   respond(call: RecordedCall): { error?: string; status: number; headers: Record<string, string>; body: string } {
@@ -200,6 +218,10 @@ export class HttpInterceptor {
     if (this._clock) {
       this._clock.setTimeout(() => { this._partitioned = false; }, duration);
     } else {
+      console.warn(
+        'SimNode: HttpInterceptor.blockAll() called without a virtual clock. ' +
+        'Falling back to real setTimeout — partition duration will be wall-clock, not deterministic.',
+      );
       setTimeout(() => { this._partitioned = false; }, duration);
     }
   }

@@ -29,8 +29,8 @@ describe('HTTP + Clock integration', () => {
   it('multiple requests with different latencies resolve in correct virtual order', async () => {
     const clock = new VirtualClock(0);
     const interceptor = new HttpInterceptor({ clock });
-    interceptor.mock('http://fast.api.com/', { status: 200, body: '"fast"', latency: 50 });
-    interceptor.mock('http://slow.api.com/', { status: 200, body: '"slow"', latency: 300 });
+    interceptor.mock('http://fast.api.com/', { status: 200, body: '"fast"', latency: 50, match: 'prefix' });
+    interceptor.mock('http://slow.api.com/', { status: 200, body: '"slow"', latency: 300, match: 'prefix' });
     interceptor.install();
 
     const order: string[] = [];
@@ -51,7 +51,7 @@ describe('HTTP + Clock integration', () => {
   it('100 concurrent requests all resolve correctly after clock advance', async () => {
     const clock = new VirtualClock(0);
     const interceptor = new HttpInterceptor({ clock });
-    interceptor.mock('http://bulk.api.com/', { status: 200, body: '{"n":1}', latency: 200 });
+    interceptor.mock('http://bulk.api.com/', { status: 200, body: '{"n":1}', latency: 200, match: 'prefix' });
     interceptor.install();
 
     const promises = Array.from({ length: 100 }, (_, i) =>

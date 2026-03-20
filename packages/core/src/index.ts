@@ -10,12 +10,24 @@ export { Timeline, FaultInjector } from './env.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 
-// When running from dist/ (production) the worker sits alongside this file.
-// When running from src/ (vitest transforms TS directly) fall back to dist/.
-const _workerSibling = join(__dirname, 'simulation-worker.js');
-const WORKER_SCRIPT  = existsSync(_workerSibling)
-  ? _workerSibling
-  : join(__dirname, '..', 'dist', 'simulation-worker.js');
+// Resolve the worker script across both production (dist/) and development (src/) layouts.
+function _resolveWorkerScript(): string {
+  const candidates = [
+    join(__dirname, 'simulation-worker.js'),               // production: sibling in dist/
+    join(__dirname, '..', 'dist', 'simulation-worker.js'), // dev: vitest runs from src/, worker in dist/
+    resolve(__dirname, '..', 'dist', 'simulation-worker.cjs'), // CJS fallback
+  ];
+  const found = candidates.find(p => existsSync(p));
+  if (!found) {
+    throw new Error(
+      `SimNode: Cannot locate simulation-worker.js. Searched:\n` +
+      candidates.map(p => `  - ${p}`).join('\n') +
+      `\nRun \`npm run build\` in @simnode/core first.`,
+    );
+  }
+  return found;
+}
+const WORKER_SCRIPT = _resolveWorkerScript();
 
 interface ScenarioDef {
   name: string;
@@ -74,17 +86,17 @@ export class Simulation {
   async run(opts?: { seeds?: number }): Promise<SimResult> {
     const seedCount = opts?.seeds ?? 1;
     const results: SimResult['scenarios'] = [];
-    const mongo = await _startMongo();
+    const [mongo, redis] = await Promise.all([_startMongo(), _startRedis()]);
     try {
       for (let s = 0; s < seedCount; s++) {
         const seed = this._baseSeed + s;
         for (const scenario of this._scenarios) {
-          const r = await this._runScenario(scenario, seed, mongo);
+          const r = await this._runScenario(scenario, seed, mongo, redis);
           results.push(r);
         }
       }
     } finally {
-      await _stopMongo(mongo);
+      await Promise.all([_stopMongo(mongo), _stopRedis(redis)]);
     }
     return { passed: results.every(r => r.passed), scenarios: results };
   }
@@ -92,16 +104,16 @@ export class Simulation {
   async replay(opts: { seed: number; scenario: string }): Promise<SimResult> {
     const found = this._scenarios.find(s => s.name === opts.scenario);
     if (!found) throw new Error(`Scenario not found: ${opts.scenario}`);
-    const mongo = await _startMongo();
+    const [mongo, redis] = await Promise.all([_startMongo(), _startRedis()]);
     try {
-      const r = await this._runScenario(found, opts.seed, mongo);
+      const r = await this._runScenario(found, opts.seed, mongo, redis);
       return { passed: r.passed, scenarios: [r] };
     } finally {
-      await _stopMongo(mongo);
+      await Promise.all([_stopMongo(mongo), _stopRedis(redis)]);
     }
   }
 
-  private async _runScenario(scenario: ScenarioDef, seed: number, mongo: MongoServerInfo): Promise<WorkerResult> {
+  private async _runScenario(scenario: ScenarioDef, seed: number, mongo: MongoServerInfo, redis: RedisServerInfo): Promise<WorkerResult> {
     const workerPayload: Record<string, unknown> = {
       seed,
       scenarioName: scenario.name,
@@ -109,6 +121,8 @@ export class Simulation {
       mongoHost: mongo.host,
       mongoPort: mongo.port,
       mongoDbName: `sim_db_${seed}`,
+      redisHost: redis.host,
+      redisPort: redis.port,
     };
 
     if (scenario.path) {
@@ -163,5 +177,34 @@ async function _startMongo(): Promise<MongoServerInfo> {
 }
 
 async function _stopMongo(info: MongoServerInfo): Promise<void> {
+  try { await info.stop(); } catch { /* ignore */ }
+}
+
+// ── Redis server lifecycle (one server per Simulation.run()) ──────────────────
+
+interface RedisServerInfo {
+  host: string;
+  port: number;
+  stop: () => Promise<void>;
+}
+
+async function _startRedis(): Promise<RedisServerInfo> {
+  try {
+    const { RedisMemoryServer } = await import('redis-memory-server');
+    const server = new RedisMemoryServer();
+    const host = await server.getHost();
+    const port = await server.getPort();
+    return {
+      host,
+      port,
+      stop: () => server.stop().then(() => {}),
+    };
+  } catch {
+    // redis-memory-server not available — return a sentinel that disables redis
+    return { host: '127.0.0.1', port: 6379, stop: async () => {} };
+  }
+}
+
+async function _stopRedis(info: RedisServerInfo): Promise<void> {
   try { await info.stop(); } catch { /* ignore */ }
 }

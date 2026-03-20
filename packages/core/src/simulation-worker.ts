@@ -28,6 +28,8 @@ interface WorkerInput {
   mongoHost: string;
   mongoPort: number;
   mongoDbName: string;
+  redisHost: string;
+  redisPort: number;
   /** File-based scenario: absolute path to an ES module. */
   scenarioPath?: string;
   /** Inline legacy scenario: serialised function source. */
@@ -36,11 +38,12 @@ interface WorkerInput {
 
 const { seed, scenarioName, timeout,
         mongoHost, mongoPort, mongoDbName,
+        redisHost, redisPort,
         scenarioPath, fnSource } = workerData as WorkerInput;
 
 async function main(): Promise<void> {
-  // Build a fresh env — MongoMock receives external host/port (server started by Simulation)
-  const env = await createEnv(seed, { mongoHost, mongoPort, mongoDbName });
+  // Build a fresh env — MongoMock and RedisMock receive external host/port (servers started by Simulation)
+  const env = await createEnv(seed, { mongoHost, mongoPort, mongoDbName }, { redisHost, redisPort });
 
   // Wire clock → scheduler so advance() drives all I/O completions
   env.clock.onTick = async (t: number) => {
@@ -120,8 +123,9 @@ async function main(): Promise<void> {
     env.tcp.uninstall();
     env.fs.uninstall();
     await env.tcp.stopLocalServers();
-    // Drop the scenario's MongoDB database for clean isolation
+    // Drop the scenario's MongoDB database and flush Redis for clean isolation
     try { await env.mongo.drop(); } catch { /* mongo may not have been used */ }
+    try { await env.redis.flush(); } catch { /* redis may not have been used */ }
   }
 
   parentPort!.postMessage({

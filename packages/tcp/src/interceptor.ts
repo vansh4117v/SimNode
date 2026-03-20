@@ -54,6 +54,8 @@ export class TcpInterceptor {
 
   /** Local TCP servers started via addLocalServer(). */
   private readonly _localServers: Map<number, net.Server> = new Map();
+  /** Auto-incrementing socket ID for local server connections (offset to avoid collision with VirtualSocket IDs). */
+  private _nextLocalSocketId = 100_000;
 
   constructor(opts?: TcpInterceptorOptions) {
     this._clock = opts?.clock;
@@ -104,7 +106,10 @@ export class TcpInterceptor {
     if (this._clock) {
       this._clock.setTimeout(() => { this._partitioned = false; }, duration);
     } else {
-      // Fall back to real timer for unblock
+      console.warn(
+        'SimNode: TcpInterceptor.blockAll() called without a virtual clock. ' +
+        'Falling back to real setTimeout — partition duration will be wall-clock, not deterministic.',
+      );
       setTimeout(() => { this._partitioned = false; }, duration);
     }
   }
@@ -148,6 +153,7 @@ export class TcpInterceptor {
     const extraLatencyRef = () => this._extraLatency;
 
     const server = net.createServer((socket) => {
+      const localSocketId = this._nextLocalSocketId++;
       socket.on('data', (data: Buffer) => {
         const effectiveLatency = latency + extraLatencyRef();
         const deliver = async () => {
@@ -155,7 +161,7 @@ export class TcpInterceptor {
             const result = await handler(data, {
               remoteHost: socket.remoteAddress ?? '127.0.0.1',
               remotePort: socket.remotePort ?? port,
-              socketId: -1, // real socket — no VirtualSocket id
+              socketId: localSocketId,
             });
             if (result == null) return;
             const bufs = Array.isArray(result) ? result : [result];
@@ -310,7 +316,7 @@ export class TcpInterceptor {
     // Explicitly unsupported protocols — give a clear, actionable error
     if (port === 3306) throw new SimNodeUnsupportedProtocolError('MySQL');
 
-    const key = `${host}:${port}`;
+    const key = `${normalizeHost(host)}:${port}`;
     const config = this._mocks.get(key);
 
     if (!config) {
@@ -345,6 +351,16 @@ export class TcpInterceptor {
 // Helpers
 
 /**
+ * Canonicalize loopback addresses so that `127.0.0.1`, `::1`, `[::1]`,
+ * and `localhost` all resolve to the single key `"localhost"`.
+ */
+function normalizeHost(host: string): string {
+  const h = host.toLowerCase();
+  if (h === '127.0.0.1' || h === '::1' || h === '[::1]') return 'localhost';
+  return h;
+}
+
+/**
  * Normalize a target string to `"host:port"`.
  * Accepts `"host:port"`, `"postgres://host:port"`, `"redis://host:port/0"`, etc.
  */
@@ -353,13 +369,14 @@ function normalizeTarget(target: string): string {
     try {
       const u = new URL(target);
       const port = u.port || (u.protocol === 'postgres:' || u.protocol === 'postgresql:' ? '5432' : '6379');
-      return `${u.hostname}:${port}`;
+      return `${normalizeHost(u.hostname)}:${port}`;
     } catch {
       // fall through to raw split
     }
   }
   // Already "host:port"
-  return target;
+  const [rawHost, ...rest] = target.split(':');
+  return `${normalizeHost(rawHost)}:${rest.join(':')}`;
 }
 
 /**
@@ -375,14 +392,14 @@ function normalizeNetArgs(args: unknown[]): { host: string; port: number } {
   const first = args[0];
 
   if (typeof first === 'number') {
-    const host = typeof args[1] === 'string' ? args[1] : 'localhost';
+    const host = typeof args[1] === 'string' ? normalizeHost(args[1]) : 'localhost';
     return { host, port: first };
   }
 
   if (typeof first === 'object' && first !== null) {
     const opts = first as Record<string, unknown>;
     return {
-      host: (opts.host as string) ?? 'localhost',
+      host: normalizeHost((opts.host as string) ?? 'localhost'),
       port: (opts.port as number) ?? 0,
     };
   }

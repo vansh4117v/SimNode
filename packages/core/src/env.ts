@@ -162,12 +162,18 @@ export interface MongoOpts {
   mongoDbName: string;
 }
 
+export interface RedisOpts {
+  redisHost: string;
+  redisPort: number;
+}
+
 /**
  * Build a fresh, isolated SimEnv for one scenario run.
  * mongoOpts receives the host/port of the shared MongoMemoryServer started
  * by Simulation.run() and a per-scenario db name for isolation.
+ * redisOpts receives the host/port of the shared RedisMemoryServer.
  */
-export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<SimEnv> {
+export async function createEnv(seed: number, mongoOpts?: MongoOpts, redisOpts?: RedisOpts): Promise<SimEnv> {
   const clock = new VirtualClock(0);
   const random = new SeededRandom(seed);
   const scheduler = new Scheduler({ prngSeed: seed });
@@ -179,7 +185,7 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
   const timeline = new Timeline();
 
   const pg = new PgMock();
-  const redis = new RedisMock();
+  const redis = new RedisMock(redisOpts);
   const mongo = new MongoMock(mongoOpts);
 
   const env: SimEnv = {
@@ -239,6 +245,12 @@ export function installDeterminismPatches(env: SimEnv): DeterminismPatchHandle {
 
   const rng = mulberry32(env.seed);
 
+  // Patch Math.random with an independent sub-stream (XOR'd seed avoids
+  // correlation with the crypto PRNG stream above).
+  const origMathRandom = Math.random;
+  const mathRng = mulberry32(env.seed ^ 0x6D617468);
+  Math.random = () => mathRng();
+
   const randomBytesPatch = (size: number, cb?: (err: Error | null, buf: Buffer) => void): Buffer => {
     const buf = Buffer.alloc(size);
     for (let i = 0; i < size; i++) buf[i] = Math.floor(rng() * 256);
@@ -277,12 +289,33 @@ export function installDeterminismPatches(env: SimEnv): DeterminismPatchHandle {
     }
   }
 
+  // ── process.hrtime / performance.timeOrigin ──────────────────────────────
+  const origHrtime = process.hrtime;
+  const hrtimePatch = ((prev?: [number, number]): [number, number] => {
+    const now = env.clock.now();
+    const secs = Math.floor(now / 1000);
+    const nanos = (now % 1000) * 1_000_000;
+    if (!prev) return [secs, nanos];
+    let ds = secs - prev[0];
+    let dn = nanos - prev[1];
+    if (dn < 0) { ds -= 1; dn += 1_000_000_000; }
+    return [ds, dn];
+  }) as typeof process.hrtime;
+  hrtimePatch.bigint = (): bigint => BigInt(env.clock.now()) * 1_000_000n;
+  process.hrtime = hrtimePatch;
+
+  const origPerfTimeOrigin = performance.timeOrigin;
+  Object.defineProperty(performance, 'timeOrigin', { value: 0, configurable: true });
+
   const clockResult = installClock(env.clock, { patchNextTick: false });
 
   return {
     realSetTimeout,
     restore() {
       clockResult.uninstall();
+      Math.random = origMathRandom;
+      process.hrtime = origHrtime;
+      Object.defineProperty(performance, 'timeOrigin', { value: origPerfTimeOrigin, configurable: true });
       Object.defineProperty(cryptoCjs, 'randomBytes', { value: origRandomBytes, configurable: true });
       Object.defineProperty(cryptoCjs, 'randomUUID',  { value: origRandomUUID,  configurable: true });
       if (globalCrypto) {

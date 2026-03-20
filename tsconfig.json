@@ -6,6 +6,7 @@
     { "path": "packages/http-proxy" },
     { "path": "packages/scheduler" },
     { "path": "packages/tcp" },
+    { "path": "packages/mongo" },
     { "path": "packages/pg-mock" },
     { "path": "packages/redis-mock" },
     { "path": "packages/filesystem" },

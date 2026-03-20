@@ -40,34 +40,48 @@ function inferTag(sql: string, rowCount: number, affected?: number): string {
 class PgConnection {
   private _phase: 'startup' | 'ready' = 'startup';
   private _txState: 'I' | 'T' | 'E' = 'I';
+  private _buf: Buffer = Buffer.alloc(0);
 
   constructor(private _pglite: Promise<PGliteInstance>) {}
 
   async processData(data: Buffer): Promise<Buffer> {
+    this._buf = this._buf.length > 0 ? Buffer.concat([this._buf, data]) : data;
+
     // ── Startup / SSL handshake ───────────────────────────────────────────────
     if (this._phase === 'startup') {
-      const parsed = proto.parseStartupMsg(data);
+      // SSL probe is exactly 8 bytes; startup message has a 4-byte length prefix
+      if (this._buf.length < 4) return Buffer.alloc(0);
+      const msgLen = this._buf.readInt32BE(0);
+      if (this._buf.length < msgLen) return Buffer.alloc(0);
+
+      const msg = this._buf.subarray(0, msgLen);
+      this._buf = this._buf.subarray(msgLen);
+
+      const parsed = proto.parseStartupMsg(msg);
       if ('isSSL' in parsed) return Buffer.from('N');
       this._phase = 'ready';
       return proto.startupResponse();
     }
 
-    // ── Simple Query ('Q') ────────────────────────────────────────────────────
-    if (data[0] === 0x51) {
-      const sql = proto.parseQueryMsg(data);
-      return this._execQuery(sql);
-    }
-
-    // ── Extended protocol (Parse/Bind/Execute/Sync) ───────────────────────────
-    // Process a multi-message pipeline; collect all responses and flush at Sync.
+    // ── Ready phase: consume complete framed messages ──────────────────────────
     const responses: Buffer[] = [];
-    let offset = 0;
 
-    while (offset < data.length) {
-      const msgType = String.fromCharCode(data[offset]);
-      const msgLen  = data.readInt32BE(offset + 1);
-      const payload = data.slice(offset + 5, offset + 1 + msgLen);
-      offset += 1 + msgLen;
+    while (this._buf.length >= 5) {
+      const msgType = String.fromCharCode(this._buf[0]);
+      const msgLen  = this._buf.readInt32BE(1); // includes self (4 bytes) but not type byte
+      const totalLen = 1 + msgLen;
+      if (this._buf.length < totalLen) break;   // incomplete — wait for more data
+
+      const payload = this._buf.subarray(5, totalLen);
+      this._buf = this._buf.subarray(totalLen);
+
+      // Simple Query ('Q')
+      if (msgType === 'Q') {
+        const nul = payload.indexOf(0);
+        const sql = payload.toString('utf8', 0, nul >= 0 ? nul : payload.length);
+        responses.push(await this._execQuery(sql));
+        continue;
+      }
 
       switch (msgType) {
         case 'P': { // Parse
@@ -100,7 +114,7 @@ class PgConnection {
       }
     }
 
-    return responses.length > 0 ? Buffer.concat(responses) : proto.readyForQuery(this._txState);
+    return responses.length > 0 ? Buffer.concat(responses) : Buffer.alloc(0);
   }
 
   private async _execQuery(sql: string): Promise<Buffer> {

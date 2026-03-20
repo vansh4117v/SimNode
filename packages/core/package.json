@@ -15,20 +15,23 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "clean": "rimraf dist"
   },
   "dependencies": {
     "@simnode/clock": "*",
-    "@simnode/random": "*",
-    "@simnode/scheduler": "*",
-    "@simnode/http-proxy": "*",
-    "@simnode/tcp": "*",
     "@simnode/filesystem": "*",
+    "@simnode/http-proxy": "*",
+    "@simnode/mongo": "*",
     "@simnode/pg-mock": "*",
+    "@simnode/random": "*",
     "@simnode/redis-mock": "*",
-    "@simnode/mongo": "*"
+    "@simnode/scheduler": "*",
+    "@simnode/tcp": "*",
+    "redis-memory-server": "^0.16.0"
   }
 }
