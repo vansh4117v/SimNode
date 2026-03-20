@@ -3,24 +3,7 @@ import { MinHeap } from './MinHeap.js';
 /** Internal timer entry stored in the heap. */
 export interface TimerEntry {
   id: number;
-  callback: (...args: unknown[]) => void;
-  scheduledTime: number;
-  interval?: number;
-  args: unknown[];
-}
-
-/**
- * A manually-controllable virtual clock.
- *
- * Replaces all time primitives so that `advance(duration)` fires timers
- * deterministically, in scheduled-time order.  Timers that schedule new
- * timers within the same advance window ARE picked up and executed in
-import { MinHeap } from './MinHeap.js';
-
-/** Internal timer entry stored in the heap. */
-export interface TimerEntry {
-  id: number;
-  callback: (...args: unknown[]) => void;
+  callback: (...args: unknown[]) => void | Promise<void>;
   scheduledTime: number;
   interval?: number;
   args: unknown[];
@@ -36,15 +19,22 @@ export interface TimerEntry {
  */
 export class VirtualClock {
   private _now: number;
+  private _skew: number = 0;
   private _nextId = 1;
   private _frozen = false;
   private _timers: MinHeap<TimerEntry>;
   private readonly _cancelledIds = new Set<number>();
 
   private readonly _virtualNextTickQueue: Array<(...args: unknown[]) => void> = [];
-  private readonly _virtualImmediateQueue: Array<{ id: number; callback: (...args: unknown[]) => void; args: unknown[]; }> = [];
+  private readonly _virtualImmediateQueue: Array<{ id: number; callback: (...args: unknown[]) => void | Promise<void>; args: unknown[]; }> = [];
   private _nextImmediateId = 1;
   private readonly _cancelledImmediates = new Set<number>();
+
+  /**
+   * Optional hook called after each timer fires (and after microtask flush).
+   * The clock attaches the scheduler here so that advancing time drives I/O.
+   */
+  onTick?: (time: number) => Promise<void>;
 
   constructor(startTime: number = 0) {
     this._now = startTime;
@@ -58,7 +48,7 @@ export class VirtualClock {
   // queries
 
   now(): number {
-    return this._now;
+    return this._now + this._skew;
   }
 
   pending(): Array<{ id: number; scheduledTime: number }> {
@@ -84,34 +74,45 @@ export class VirtualClock {
   async advanceTo(timestamp: number): Promise<void> {
     if (this._frozen) return;
     if (timestamp < this._now) return; // never go backward
-    
+
     while (this._timers.size > 0) {
       const next = this._timers.peek()!;
       if (next.scheduledTime > timestamp) break;
-      
+
       // If cancelled while it was in queue
       if (this._cancelledIds.has(next.id)) {
         this._timers.pop();
         this._cancelledIds.delete(next.id);
         continue;
       }
-      
+
       // Pop right before execution
       this._timers.pop();
       if (this._cancelledIds.has(next.id)) {
          this._cancelledIds.delete(next.id);
          continue;
       }
-      
+
       this._now = next.scheduledTime;
-      
+
       try {
-        next.callback(...next.args);
+        // Call synchronously first so that process.nextTick callbacks
+        // registered inside the timer run before native Promise microtasks.
+        // If the callback is async, await its returned Promise afterward.
+        const maybePromise = next.callback(...next.args);
+        await this._flushMicrotasks();
+        if (maybePromise instanceof Promise) await maybePromise;
       } catch (err) {
         throw new Error(`VirtualClock timer callback failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
       }
 
       await this._flushMicrotasks();
+
+      // Call onTick hook so the scheduler can run I/O completions for this tick
+      if (this.onTick) {
+        await this.onTick(this._now + this._skew);
+        await this._flushMicrotasks();
+      }
 
       // If this was an interval AND not cancelled during the callback or microtasks,
       // reschedule for the next tick.
@@ -126,15 +127,20 @@ export class VirtualClock {
       await this._flushImmediates();
     }
     this._now = timestamp;
-    
+
     // End of advance flush
     await this._flushMicrotasks();
+    if (this.onTick) {
+      await this.onTick(this._now + this._skew);
+      await this._flushMicrotasks();
+    }
     await this._flushImmediates();
   }
 
   private async _flushMicrotasks(): Promise<void> {
     let draining = true;
     while (draining) {
+      // Phase 1: drain the virtual nextTick queue synchronously (nextTick runs before native microtasks)
       while (this._virtualNextTickQueue.length > 0) {
         const cb = this._virtualNextTickQueue.shift()!;
         try {
@@ -143,8 +149,10 @@ export class VirtualClock {
           throw new Error(`VirtualClock nextTick failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
         }
       }
-      // Execute V8 microtasks
+      // Phase 2: one V8 microtask checkpoint (lets native Promise chains resolve)
       await Promise.resolve();
+      // Phase 3: if new nextTick callbacks were enqueued by those microtasks, loop again;
+      // otherwise we're stable.
       if (this._virtualNextTickQueue.length === 0) {
         draining = false;
       }
@@ -161,7 +169,7 @@ export class VirtualClock {
         continue;
       }
       try {
-        imm.callback(...imm.args);
+        await Promise.resolve(imm.callback(...imm.args));
       } catch (err) {
         throw new Error(`VirtualClock immediate failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
       }
@@ -178,10 +186,18 @@ export class VirtualClock {
     this._frozen = false;
   }
 
+  /**
+   * Apply a clock skew offset (ms). Does NOT fire timers.
+   * `now()` returns `_now + _skew`.
+   */
+  skew(amount: number): void {
+    this._skew += amount;
+  }
+
   // timer primitives
 
   setTimeout(
-    callback: (...args: unknown[]) => void,
+    callback: (...args: unknown[]) => void | Promise<void>,
     delay: number = 0,
     ...args: unknown[]
   ): number {
@@ -196,7 +212,7 @@ export class VirtualClock {
   }
 
   setInterval(
-    callback: (...args: unknown[]) => void,
+    callback: (...args: unknown[]) => void | Promise<void>,
     delay: number,
     ...args: unknown[]
   ): number {
@@ -221,7 +237,7 @@ export class VirtualClock {
     this._timers.remove((t) => t.id === id);
   }
 
-  setImmediate(callback: (...args: unknown[]) => void, ...args: unknown[]): number {
+  setImmediate(callback: (...args: unknown[]) => void | Promise<void>, ...args: unknown[]): number {
     const id = this._nextImmediateId++;
     this._virtualImmediateQueue.push({ id, callback, args });
     return id;
@@ -239,6 +255,7 @@ export class VirtualClock {
 
   reset(startTime: number = 0): void {
     this._now = startTime;
+    this._skew = 0;
     this._nextId = 1;
     this._frozen = false;
     this._timers = new MinHeap<TimerEntry>((a, b) =>
@@ -251,5 +268,6 @@ export class VirtualClock {
     this._virtualImmediateQueue.length = 0;
     this._cancelledImmediates.clear();
     this._nextImmediateId = 1;
+    this.onTick = undefined;
   }
 }

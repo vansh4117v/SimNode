@@ -6,7 +6,7 @@ describe('Virtual microtask queue', () => {
   let uninstall: () => void;
 
   beforeEach(() => {
-    const installed = install();
+    const installed = install(undefined, { patchNextTick: true });
     clock = installed.clock;
     uninstall = installed.uninstall;
   });

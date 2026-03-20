@@ -1,6 +1,7 @@
-import type { HttpInterceptor, RecordedCall } from './HttpInterceptor.js';
+import type { HttpInterceptor, IScheduler, RecordedCall } from './HttpInterceptor.js';
 import { Buffer } from 'node:buffer';
-import { Readable } from 'node:stream';
+
+let _fetchReqCounter = 0;
 
 export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: typeof globalThis.fetch) {
   return async function fakeFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -17,7 +18,6 @@ export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: ty
         headers[key.toLowerCase()] = value;
       });
       if (input.body) {
-         // This is a naive extraction for tests. A real polyfill would handle streams properly.
          try {
             const ab = await input.arrayBuffer();
             body = Buffer.from(ab).toString('utf-8');
@@ -52,24 +52,15 @@ export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: ty
          } else if (init.body instanceof Buffer) {
             body = init.body.toString('utf-8');
          } else {
-             body = String(init.body); // Fallback for simple testing
+             body = String(init.body);
          }
       }
     }
 
-    // 2. We can't synchronously 'intercept' easily if we want to use the HttpInterceptor's built-in event-based client request, 
-    // but we CAN build a pseudo recorded call and query the interceptor's routes directly if it exposed them, 
-    // OR we can make a fake request through the interceptor and wrap it in a Promise.
-
     return new Promise((resolve, reject) => {
-       // We use the interceptor's internal `_intercept` if possible, but that's private.
-       // However, we just patched `http.request` during `install()`.
-       // We CAN'T rely on `http.request` because fetch might be purely native in Node 18+.
-       // Instead, we will use the HttpInterceptor's `_intercept` method by casting it to any.
-       
        const anyInterceptor = interceptor as any;
        const route = anyInterceptor._routes.find((r: any) => r.matches(url));
-       
+
        const call: RecordedCall = {
          method,
          url,
@@ -78,6 +69,11 @@ export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: ty
          timestamp: anyInterceptor._clock?.now() ?? Date.now(),
        };
        anyInterceptor._allCalls.push(call);
+
+       // Network partition check
+       if (anyInterceptor._partitioned) {
+         return reject(Object.assign(new TypeError(`fetch failed: Network partition active — ${method} ${url} rejected`), { code: 'ECONNREFUSED' }));
+       }
 
        if (!route) {
          return reject(new TypeError(`fetch failed: No mock matched: ${method} ${url}`));
@@ -94,21 +90,31 @@ export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: ty
          if (result.error) {
            return reject(new TypeError(result.error));
          }
-         
-         // Build a Response object
+
          const responseHeaders = new Headers(result.headers);
          const response = new Response(result.body, {
             status: result.status,
             statusText: 'MOCKED',
             headers: responseHeaders,
          });
-         
+
          resolve(response);
        };
 
        const latency = route.config.latency;
        if (latency && latency > 0 && anyInterceptor._clock) {
-         anyInterceptor._clock.setTimeout(deliver, latency);
+         const when = anyInterceptor._clock.now() + latency;
+         // Fix #6: use scheduler for deterministic same-tick ordering
+         if (anyInterceptor._scheduler) {
+           const opId = `fetch-${++_fetchReqCounter}`;
+           (anyInterceptor._scheduler as IScheduler).enqueueCompletion({
+             id: opId,
+             when,
+             run: () => { deliver(); return Promise.resolve(); },
+           });
+         } else {
+           anyInterceptor._clock.setTimeout(deliver, latency);
+         }
        } else {
          deliver();
        }

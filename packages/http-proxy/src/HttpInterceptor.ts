@@ -11,6 +11,11 @@ export interface IClock {
   setTimeout(cb: (...args: unknown[]) => void, delay: number): number;
 }
 
+/** Minimal scheduler interface (duck-typed). */
+export interface IScheduler {
+  enqueueCompletion(op: { id: string; when: number; run: () => Promise<void> | void }): void;
+}
+
 export interface MockResponseConfig {
   status?: number;
   headers?: Record<string, string>;
@@ -145,18 +150,24 @@ const _require = createRequire(import.meta.url);
 const httpCjs = _require('node:http') as typeof http;
 const httpsCjs = _require('node:https') as typeof https;
 
+let _httpReqCounter = 0;
+
 export class HttpInterceptor {
   private readonly _routes: MockRoute[] = [];
   private readonly _allCalls: RecordedCall[] = [];
   private readonly _clock?: IClock;
+  private readonly _scheduler?: IScheduler;
+
+  private _partitioned = false;
 
   private _origHttpRequest?: typeof http.request;
   private _origHttpGet?: typeof http.get;
   private _origHttpsRequest?: typeof https.request;
   private _origHttpsGet?: typeof https.get;
 
-  constructor(opts?: { clock?: IClock }) {
+  constructor(opts?: { clock?: IClock; scheduler?: IScheduler }) {
     this._clock = opts?.clock;
+    this._scheduler = opts?.scheduler;
   }
 
   // mock registration
@@ -177,6 +188,19 @@ export class HttpInterceptor {
       if (urlPrefix && !c.url.startsWith(urlPrefix)) return false;
       return true;
     });
+  }
+
+  /**
+   * Block all HTTP requests for `duration` virtual ms.
+   * Requests made during the partition receive a connection-refused error.
+   */
+  blockAll(duration: number): void {
+    this._partitioned = true;
+    if (this._clock) {
+      this._clock.setTimeout(() => { this._partitioned = false; }, duration);
+    } else {
+      setTimeout(() => { this._partitioned = false; }, duration);
+    }
   }
 
   // patching
@@ -213,11 +237,13 @@ export class HttpInterceptor {
     if (this._origHttpGet) httpCjs.get = this._origHttpGet;
     if (this._origHttpsRequest) httpsCjs.request = this._origHttpsRequest;
     if (this._origHttpsGet) httpsCjs.get = this._origHttpsGet;
+    this._partitioned = false;
   }
 
   reset(): void {
     this._routes.length = 0;
     this._allCalls.length = 0;
+    this._partitioned = false;
   }
 
   // internal
@@ -241,6 +267,12 @@ export class HttpInterceptor {
         timestamp: this._clock?.now() ?? Date.now(),
       };
       this._allCalls.push(call);
+
+      // Network partition: reject with error
+      if (this._partitioned) {
+        fakeReq.emit('error', Object.assign(new Error(`Network partition: ${method} ${url} rejected`), { code: 'ECONNREFUSED' }));
+        return;
+      }
 
       if (!route) {
         fakeReq.emit('error', new Error(`No mock matched: ${method} ${url}`));
@@ -267,7 +299,18 @@ export class HttpInterceptor {
 
       const latency = route.config.latency;
       if (latency && latency > 0 && this._clock) {
-        this._clock.setTimeout(deliver, latency);
+        const when = this._clock.now() + latency;
+        // Fix #6: route through scheduler for deterministic same-tick ordering
+        if (this._scheduler) {
+          const opId = `http-${++_httpReqCounter}`;
+          this._scheduler.enqueueCompletion({
+            id: opId,
+            when,
+            run: () => { deliver(); return Promise.resolve(); },
+          });
+        } else {
+          this._clock.setTimeout(deliver, latency);
+        }
       } else {
         deliver();
       }

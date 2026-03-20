@@ -49,6 +49,8 @@ export class VirtualSocket extends Duplex {
 
   /** Simulate connection establishment (called by the interceptor). */
   _simulateConnect(): void {
+    // Fix #8: guard against destroyed socket to prevent connect race
+    if (this.destroyed) return;
     this.connecting = false;
     this._connected = true;
     this.emit('connect');
@@ -83,7 +85,7 @@ export class VirtualSocket extends Duplex {
       const when = this._clock.now() + this._latency;
       if (this._scheduler) {
         this._scheduler.enqueueCompletion({
-          id: `tcp-${this.id}-${Date.now()}`,
+          id: `tcp-${this.id}-${this._clock.now()}`,
           when,
           run: deliver,
         });
@@ -93,12 +95,12 @@ export class VirtualSocket extends Duplex {
     } else if (this._latency > 0 && this._scheduler) {
       // Scheduler without clock: enqueue at current time + latency placeholder
       this._scheduler.enqueueCompletion({
-        id: `tcp-${this.id}-${Date.now()}`,
+        id: `tcp-${this.id}-fallback`,
         when: this._latency,
         run: deliver,
       });
     } else {
-      // No latency: deliver synchronously (still async-safe via queueMicrotask)
+      // No latency: deliver via microtask (avoids synchronous re-entrancy)
       queueMicrotask(() => { void deliver(); });
     }
 

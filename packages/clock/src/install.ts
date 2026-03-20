@@ -6,13 +6,28 @@ export interface ClockInstallResult {
   uninstall: () => void;
 }
 
+export interface ClockInstallOptions {
+  /**
+   * If true (the default), patch `process.nextTick` to route through the virtual clock.
+   * This ensures deterministic ordering of nextTick callbacks relative to timers.
+   *
+   * Set to false only when your scenario uses dynamic `import()`, undici, or other
+   * Node.js internals that rely on `process.nextTick` for initialization, and those
+   * operations run outside of any `advance()` call (which would otherwise drain the
+   * virtual nextTick queue via `_flushMicrotasks`).
+   *
+   * @default true
+   */
+  patchNextTick?: boolean;
+}
+
 /**
  * Patch all global time primitives to use a VirtualClock.
  *
  * Returns the clock instance and an `uninstall` function that restores
  * every original global.
  */
-export function install(clockOrStart?: VirtualClock | number): ClockInstallResult {
+export function install(clockOrStart?: VirtualClock | number, opts?: ClockInstallOptions): ClockInstallResult {
   const clock =
     clockOrStart instanceof VirtualClock
       ? clockOrStart
@@ -54,7 +69,7 @@ export function install(clockOrStart?: VirtualClock | number): ClockInstallResul
     (globalThis as any).clearImmediate = (id: number) => clock.clearImmediate(id);
   }
 
-  if (globalThis.process && typeof globalThis.process.nextTick === 'function') {
+  if (opts?.patchNextTick !== false && globalThis.process && typeof globalThis.process.nextTick === 'function') {
     globalThis.process.nextTick = (cb: (...a: unknown[]) => void, ...args: unknown[]) => clock.nextTick(cb, ...args);
   }
 
@@ -68,7 +83,7 @@ export function install(clockOrStart?: VirtualClock | number): ClockInstallResul
     globalThis.clearInterval = originals.clearInterval;
     if (originals.setImmediate) globalThis.setImmediate = originals.setImmediate;
     if (originals.clearImmediate) globalThis.clearImmediate = originals.clearImmediate;
-    if (globalThis.process && originals.nextTick) globalThis.process.nextTick = originals.nextTick;
+    if (originals.nextTick && globalThis.process) globalThis.process.nextTick = originals.nextTick;
     globalThis.performance.now = originals.performanceNow;
   }
 
