@@ -168,8 +168,8 @@ describe('Simulation seed replay', () => {
 
     // Extract the DATA line from each timeline and compare
     const extractData = (tl: string): string => tl.match(/DATA: ([^\n]+)/)?.[1] ?? '';
-    expect(extractData(r1.scenarios[0].timeline)).toBe(extractData(r2.scenarios[0].timeline));
-    expect(extractData(r1.scenarios[0].timeline)).not.toBe('');
+    expect(extractData(r1.result.timeline)).toBe(extractData(r2.result.timeline));
+    expect(extractData(r1.result.timeline)).not.toBe('');
   }, 30_000);
 });
 
@@ -198,7 +198,10 @@ describe('Unmocked TCP safety', () => {
     });
     const result = await sim.run();
     expect(result.passed).toBe(true);
-    expect(result.scenarios[0].timeline).toContain('Correctly blocked');
+    expect(result.passes).toBe(1);
+    // Verify timeline via replay since passing scenario timelines are not retained in run()
+    const replayed = await sim.replay({ seed: 0, scenario: 'unmocked' });
+    expect(replayed.result.timeline).toContain('Correctly blocked');
   });
 });
 
@@ -228,6 +231,8 @@ describe('Filesystem disk full', () => {
     });
     const result = await sim.run();
     expect(result.passed).toBe(true);
-    expect(result.scenarios[0].timeline).toContain('ENOSPC caught');
+    expect(result.passes).toBe(1);
+    const replayed = await sim.replay({ seed: 0, scenario: 'disk full' });
+    expect(replayed.result.timeline).toContain('ENOSPC caught');
   });
 });
