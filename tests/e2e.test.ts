@@ -7,6 +7,7 @@ import { TcpInterceptor, SimNodeUnmockedTCPConnectionError } from '@simnode/tcp'
 import { PgMock } from '@simnode/pg-mock';
 import { RedisMock } from '@simnode/redis-mock';
 import { Simulation } from '@simnode/core';
+import type { SimEnv } from '@simnode/core';
 
 const _require = createRequire(import.meta.url);
 const net: typeof netTypes = _require('node:net');
@@ -57,21 +58,26 @@ describe('Scheduler + PG mock ordering', () => {
 
       const order: string[] = [];
 
+      // Wait for PGlite to initialise and seed data before scheduling
+      await pg.ready();
+
       // Simulate two concurrent DB queries at the same virtual time
       scheduler.enqueueCompletion({
         id: 'query-A',
         when: 100,
-        run: () => {
-          const r = pg.store.execSQL('SELECT * FROM items');
-          order.push(`A:${r.rows![0][1]}`);
+        run: async () => {
+          const r = await pg.query('SELECT * FROM items');
+          const row = r.rows[0] as { id: string; name: string };
+          order.push(`A:${row.name}`);
         },
       });
       scheduler.enqueueCompletion({
         id: 'query-B',
         when: 100,
-        run: () => {
-          const r = pg.store.execSQL('SELECT * FROM items');
-          order.push(`B:${r.rows![0][1]}`);
+        run: async () => {
+          const r = await pg.query('SELECT * FROM items');
+          const row = r.rows[0] as { id: string; name: string };
+          order.push(`B:${row.name}`);
         },
       });
 
@@ -86,7 +92,7 @@ describe('Scheduler + PG mock ordering', () => {
     expect(run1).toHaveLength(2);
     expect(run1).toContain('A:Widget');
     expect(run1).toContain('B:Widget');
-  });
+  }, 30_000);
 });
 
 /* ── B) Redis concurrent INCR ──────────────────────── */
@@ -135,7 +141,7 @@ describe('Simulation seed replay', () => {
 
     const sim = new Simulation();
 
-    sim.scenario('determinism', async (env) => {
+    sim.scenario('determinism', async (env: SimEnv) => {
       const vals = [env.random.next(), env.random.next(), env.random.next()];
       env.timeline.record({ timestamp: 0, type: 'DATA', detail: vals.join(',') });
     });
@@ -157,7 +163,7 @@ describe('Simulation seed replay', () => {
 describe('Unmocked TCP safety', () => {
   it('throws SimNodeUnmockedTCPConnectionError during simulation', async () => {
     const sim = new Simulation();
-    sim.scenario('unmocked', async (env) => {
+    sim.scenario('unmocked', async (env: SimEnv) => {
       // env.tcp is already installed by the Simulation runner (simulation-worker.ts).
       // require() is injected into the vm sandbox by the worker.
       const net = require('node:net');
@@ -185,7 +191,7 @@ describe('Unmocked TCP safety', () => {
 describe('Filesystem disk full', () => {
   it('app handles ENOSPC gracefully', async () => {
     const sim = new Simulation();
-    sim.scenario('disk full', async (env) => {
+    sim.scenario('disk full', async (env: SimEnv) => {
       env.faults.diskFull('/data/log.txt');
       // env.fs is already installed by the worker; re-install is a no-op.
       env.fs.install();

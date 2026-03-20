@@ -1,70 +1,78 @@
 import { describe, it, expect } from 'vitest';
-import { PgMock, SimNodeUnsupportedPGFeature, proto } from '../src/index.js';
+import { PgMock } from '../src/index.js';
 
-describe('PgStore SQL execution', () => {
-  it('SELECT literal', () => {
+describe('PgMock SQL execution via PGlite', () => {
+  it('SELECT literal', async () => {
     const pg = new PgMock();
-    const r = pg.store.execSQL('SELECT 1');
-    expect(r.tag).toBe('SELECT 1');
-    expect(r.columns).toEqual(['?column?']);
-    expect(r.rows).toEqual([['1']]);
-  });
+    await pg.ready();
+    const r = await pg.query('SELECT 1');
+    const row = r.rows[0] as Record<string, unknown>;
+    expect(row['?column?']).toBe(1);
+  }, 30_000);
 
-  it('SELECT from seeded table', () => {
+  it('SELECT from seeded table', async () => {
     const pg = new PgMock();
     pg.seedData('users', [
       { id: '1', name: 'Alice' },
       { id: '2', name: 'Bob' },
     ]);
-    const r = pg.store.execSQL('SELECT id, name FROM users');
-    expect(r.tag).toBe('SELECT 2');
-    expect(r.columns).toEqual(['id', 'name']);
-    expect(r.rows).toEqual([['1', 'Alice'], ['2', 'Bob']]);
-  });
+    await pg.ready();
+    const r = await pg.query<{ id: string; name: string }>('SELECT id, name FROM users');
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows[0]).toMatchObject({ id: '1', name: 'Alice' });
+  }, 30_000);
 
-  it('SELECT with WHERE', () => {
+  it('SELECT with WHERE', async () => {
     const pg = new PgMock();
     pg.seedData('users', [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]);
-    const r = pg.store.execSQL("SELECT name FROM users WHERE id = 1");
-    expect(r.rows).toEqual([['Alice']]);
-  });
+    await pg.ready();
+    const r = await pg.query<{ name: string }>("SELECT name FROM users WHERE id = '1'");
+    expect(r.rows).toEqual([{ name: 'Alice' }]);
+  }, 30_000);
 
-  it('INSERT adds row', () => {
+  it('INSERT adds row', async () => {
     const pg = new PgMock();
-    pg.seedData('users', []);
-    const r = pg.store.execSQL("INSERT INTO users (id, name) VALUES (1, 'Carol')");
-    expect(r.tag).toBe('INSERT 0 1');
-    const q = pg.store.execSQL('SELECT * FROM users');
+    await pg.ready();
+    await pg.query("CREATE TABLE users (id TEXT, name TEXT)");
+    await pg.query("INSERT INTO users (id, name) VALUES ('1', 'Carol')");
+    const q = await pg.query('SELECT * FROM users');
     expect(q.rows).toHaveLength(1);
-  });
+  }, 30_000);
 
-  it('UPDATE modifies row', () => {
+  it('UPDATE modifies row', async () => {
     const pg = new PgMock();
     pg.seedData('accounts', [{ id: '1', balance: '100' }]);
-    pg.store.execSQL("UPDATE accounts SET balance = 0 WHERE id = 1");
-    const q = pg.store.execSQL('SELECT balance FROM accounts WHERE id = 1');
-    expect(q.rows).toEqual([['0']]);
-  });
+    await pg.ready();
+    await pg.query("UPDATE accounts SET balance = '0' WHERE id = '1'");
+    const q = await pg.query<{ balance: string }>("SELECT balance FROM accounts WHERE id = '1'");
+    expect(q.rows[0].balance).toBe('0');
+  }, 30_000);
 
-  it('DELETE removes row', () => {
+  it('DELETE removes row', async () => {
     const pg = new PgMock();
     pg.seedData('users', [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]);
-    pg.store.execSQL("DELETE FROM users WHERE id = 1");
-    const q = pg.store.execSQL('SELECT * FROM users');
+    await pg.ready();
+    await pg.query("DELETE FROM users WHERE id = '1'");
+    const q = await pg.query('SELECT * FROM users');
     expect(q.rows).toHaveLength(1);
-  });
+  }, 30_000);
 
-  it('BEGIN/COMMIT/ROLLBACK', () => {
+  it('transaction BEGIN/COMMIT', async () => {
     const pg = new PgMock();
-    expect(pg.store.execSQL('BEGIN').tag).toBe('BEGIN');
-    expect(pg.store.execSQL('COMMIT').tag).toBe('COMMIT');
-    expect(pg.store.execSQL('ROLLBACK').tag).toBe('ROLLBACK');
-  });
+    await pg.ready();
+    await pg.query('BEGIN');
+    await pg.query("CREATE TABLE t (v TEXT)");
+    await pg.query("INSERT INTO t VALUES ('hello')");
+    await pg.query('COMMIT');
+    const r = await pg.query('SELECT * FROM t');
+    expect(r.rows).toHaveLength(1);
+  }, 30_000);
 
-  it('throws SimNodeUnsupportedPGFeature for unknown SQL', () => {
+  it('reports error for invalid SQL', async () => {
     const pg = new PgMock();
-    expect(() => pg.store.execSQL('CREATE TABLE foo (id INT)')).toThrow(SimNodeUnsupportedPGFeature);
-  });
+    await pg.ready();
+    await expect(pg.query('SELECT * FROM nonexistent_table_xyz')).rejects.toThrow();
+  }, 30_000);
 });
 
 describe('PG wire protocol', () => {

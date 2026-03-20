@@ -285,12 +285,12 @@ describe('unmocked TCP safety', () => {
       .toThrow(SimNodeUnmockedTCPConnectionError);
   });
 
-  it('error message includes host and port', () => {
+  it('MySQL (port 3306) throws SimNodeUnsupportedProtocolError', () => {
     interceptor = new TcpInterceptor();
     interceptor.install();
 
     expect(() => net.createConnection(3306, 'db.prod.internal'))
-      .toThrow(/db\.prod\.internal:3306/);
+      .toThrow(/MySQL is not supported/);
   });
 });
 

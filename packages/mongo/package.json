@@ -18,6 +18,7 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
+    "mongodb": "^6.0.0",
     "mongodb-memory-server": "^10.0.0"
   }
 }

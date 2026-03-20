@@ -3,6 +3,7 @@ export { TcpInterceptor } from './interceptor.js';
 export type { TcpInterceptorOptions } from './interceptor.js';
 export {
   SimNodeUnmockedTCPConnectionError,
+  SimNodeUnsupportedProtocolError,
   type IClock,
   type IScheduler,
   type TcpMockHandler,

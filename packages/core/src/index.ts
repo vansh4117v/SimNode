@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 
 // Re-export shared types so consumers import from a single entry point.
@@ -19,7 +19,10 @@ const WORKER_SCRIPT  = existsSync(_workerSibling)
 
 interface ScenarioDef {
   name: string;
-  fn: (env: import('./env.js').SimEnv) => Promise<void>;
+  /** Absolute path to a scenario module (preferred). */
+  path?: string;
+  /** Inline function — serialised via fn.toString() for the worker (legacy). */
+  fn?: (env: import('./env.js').SimEnv) => Promise<void>;
 }
 
 export interface SimResult {
@@ -51,47 +54,72 @@ export class Simulation {
     this._timeout  = opts?.timeout ?? 30_000;
   }
 
-  scenario(name: string, fn: (env: import('./env.js').SimEnv) => Promise<void>): void {
-    this._scenarios.push({ name, fn });
+  /**
+   * Register a scenario.
+   *
+   * @param name     Unique scenario name.
+   * @param fnOrPath Either an **absolute file path** (string) to a module whose
+   *                 default export is `async (env: SimEnv) => void`, OR an
+   *                 inline async function (serialised for the worker — closures
+   *                 over outer-scope variables are NOT available).
+   */
+  scenario(name: string, fnOrPath: string | ((env: import('./env.js').SimEnv) => Promise<void>)): void {
+    if (typeof fnOrPath === 'string') {
+      this._scenarios.push({ name, path: resolve(fnOrPath) });
+    } else {
+      this._scenarios.push({ name, fn: fnOrPath });
+    }
   }
 
   async run(opts?: { seeds?: number }): Promise<SimResult> {
     const seedCount = opts?.seeds ?? 1;
     const results: SimResult['scenarios'] = [];
-
-    for (let s = 0; s < seedCount; s++) {
-      const seed = this._baseSeed + s;
-      for (const scenario of this._scenarios) {
-        const r = await this._runScenario(scenario, seed);
-        results.push(r);
+    const mongo = await _startMongo();
+    try {
+      for (let s = 0; s < seedCount; s++) {
+        const seed = this._baseSeed + s;
+        for (const scenario of this._scenarios) {
+          const r = await this._runScenario(scenario, seed, mongo);
+          results.push(r);
+        }
       }
+    } finally {
+      await _stopMongo(mongo);
     }
-
     return { passed: results.every(r => r.passed), scenarios: results };
   }
 
   async replay(opts: { seed: number; scenario: string }): Promise<SimResult> {
     const found = this._scenarios.find(s => s.name === opts.scenario);
     if (!found) throw new Error(`Scenario not found: ${opts.scenario}`);
-    const r = await this._runScenario(found, opts.seed);
-    return { passed: r.passed, scenarios: [r] };
+    const mongo = await _startMongo();
+    try {
+      const r = await this._runScenario(found, opts.seed, mongo);
+      return { passed: r.passed, scenarios: [r] };
+    } finally {
+      await _stopMongo(mongo);
+    }
   }
 
-  private _runScenario(scenario: ScenarioDef, seed: number): Promise<WorkerResult> {
+  private _runScenario(scenario: ScenarioDef, seed: number, mongo: MongoServerInfo): Promise<WorkerResult> {
     return new Promise((resolve, reject) => {
-      // Serialise the scenario function for the worker.
-      // NOTE: scenarios must be self-contained – closures over variables defined
-      // outside the scenario body are not available in the worker context.
-      const fnSource = scenario.fn.toString();
+      const workerPayload: Record<string, unknown> = {
+        seed,
+        scenarioName: scenario.name,
+        timeout: this._timeout,
+        mongoHost: mongo.host,
+        mongoPort: mongo.port,
+        mongoDbName: `sim_db_${seed}`,
+      };
 
-      const worker = new Worker(WORKER_SCRIPT, {
-        workerData: {
-          seed,
-          fnSource,
-          scenarioName: scenario.name,
-          timeout: this._timeout,
-        },
-      });
+      if (scenario.path) {
+        workerPayload.scenarioPath = scenario.path;
+      } else {
+        // Legacy inline function — serialised for vm eval
+        workerPayload.fnSource = scenario.fn!.toString();
+      }
+
+      const worker = new Worker(WORKER_SCRIPT, { workerData: workerPayload });
 
       worker.once('message', (result: WorkerResult) => resolve(result));
       worker.once('error',   (err)                   => reject(err));
@@ -102,4 +130,33 @@ export class Simulation {
       });
     });
   }
+}
+
+// ── MongoDB server lifecycle (one server per Simulation.run()) ────────────────
+
+interface MongoServerInfo {
+  host: string;
+  port: number;
+  stop: () => Promise<void>;
+}
+
+async function _startMongo(): Promise<MongoServerInfo> {
+  try {
+    const { MongoMemoryServer } = await import('mongodb-memory-server');
+    const server = await MongoMemoryServer.create();
+    const uri = server.getUri();
+    const url = new URL(uri);
+    return {
+      host: url.hostname,
+      port: parseInt(url.port, 10),
+      stop: () => server.stop().then(() => {}),
+    };
+  } catch {
+    // mongodb-memory-server not available — return a sentinel that disables mongo
+    return { host: '127.0.0.1', port: 27017, stop: async () => {} };
+  }
+}
+
+async function _stopMongo(info: MongoServerInfo): Promise<void> {
+  try { await info.stop(); } catch { /* ignore */ }
 }

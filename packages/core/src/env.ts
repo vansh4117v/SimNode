@@ -144,11 +144,18 @@ function _tryAddLocalServer(tcp: TcpInterceptor, port: number, handler: import('
 
 // ── createEnv ─────────────────────────────────────────────────────────────────
 
+export interface MongoOpts {
+  mongoHost: string;
+  mongoPort: number;
+  mongoDbName: string;
+}
+
 /**
  * Build a fresh, isolated SimEnv for one scenario run.
- * Async because MongoMock.start() spins up an embedded mongod process.
+ * mongoOpts receives the host/port of the shared MongoMemoryServer started
+ * by Simulation.run() and a per-scenario db name for isolation.
  */
-export async function createEnv(seed: number): Promise<SimEnv> {
+export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<SimEnv> {
   const clock = new VirtualClock(0);
   const random = new SeededRandom(seed);
   const scheduler = new Scheduler({ prngSeed: seed });
@@ -161,8 +168,7 @@ export async function createEnv(seed: number): Promise<SimEnv> {
 
   const pg = new PgMock();
   const redis = new RedisMock();
-  const mongo = new MongoMock();
-  // mongo.start() is lazy — called on first connection inside createHandler()
+  const mongo = new MongoMock(mongoOpts);
 
   const env: SimEnv = {
     seed, clock, random, scheduler,

@@ -263,63 +263,17 @@ function parseOpQuery(body: Buffer): { collection: string; query: BsonDoc } {
 }
 
 // ---------------------------------------------------------------------------
-// MongoStore — legacy in-memory store (kept for seedData / direct test access)
+// MongoMock options
 // ---------------------------------------------------------------------------
 
-type MongoDoc = Record<string, unknown>;
-
-export class MongoStore {
-  private _dbs = new Map<string, Map<string, MongoDoc[]>>();
-  private _idCounter = 1;
-
-  private getCollection(db: string, coll: string): MongoDoc[] {
-    if (!this._dbs.has(db)) this._dbs.set(db, new Map());
-    const dbMap = this._dbs.get(db)!;
-    if (!dbMap.has(coll)) dbMap.set(coll, []);
-    return dbMap.get(coll)!;
-  }
-
-  seedData(db: string, collection: string, docs: MongoDoc[]): void {
-    const coll = this.getCollection(db, collection);
-    for (const doc of docs) coll.push({ _id: this._idCounter++, ...doc });
-  }
-
-  reset(): void {
-    this._dbs.clear();
-    this._idCounter = 1;
-  }
+export interface MongoMockOpts {
+  /** Hostname of the shared MongoMemoryServer (provided by Simulation.run()). */
+  mongoHost?: string;
+  /** Port of the shared MongoMemoryServer. */
+  mongoPort?: number;
+  /** Per-scenario database name (e.g. sim_db_42). */
+  mongoDbName?: string;
 }
-
-// Simple filter matching — kept for any remaining sync usage
-function matchesFilter(doc: MongoDoc, filter: MongoDoc): boolean {
-  for (const [key, expected] of Object.entries(filter)) {
-    if (key === '$and') {
-      if (!(expected as MongoDoc[]).every(f => matchesFilter(doc, f))) return false;
-      continue;
-    }
-    if (key === '$or') {
-      if (!(expected as MongoDoc[]).some(f => matchesFilter(doc, f))) return false;
-      continue;
-    }
-    const actual = doc[key];
-    if (expected !== null && typeof expected === 'object' && !Array.isArray(expected) && !Buffer.isBuffer(expected)) {
-      const ops = expected as Record<string, unknown>;
-      if ('$gt' in ops && !((actual as number) > (ops.$gt as number))) return false;
-      if ('$lt' in ops && !((actual as number) < (ops.$lt as number))) return false;
-      if ('$gte' in ops && !((actual as number) >= (ops.$gte as number))) return false;
-      if ('$lte' in ops && !((actual as number) <= (ops.$lte as number))) return false;
-      if ('$ne' in ops && actual === ops.$ne) return false;
-      if ('$in' in ops && !(ops.$in as unknown[]).includes(actual)) return false;
-      if ('$exists' in ops && Boolean(ops.$exists) !== (actual !== undefined)) return false;
-    } else {
-      if (actual !== expected) return false;
-    }
-  }
-  return true;
-}
-
-// Exported so tests that import matchesFilter still compile
-export { matchesFilter };
 
 // ---------------------------------------------------------------------------
 // MongoProxyConnection — per-client-connection TCP proxy to real mongod
@@ -390,70 +344,66 @@ class MongoProxyConnection {
 }
 
 // ---------------------------------------------------------------------------
-// MongoMock — public API (mongodb-memory-server backend)
+// MongoMock — public API
 // ---------------------------------------------------------------------------
 
 export class MongoMock {
-  /** Legacy store — available for tests that need direct data access. */
-  readonly store: MongoStore;
-
-  private _server:       import('mongodb-memory-server').MongoMemoryServer | null = null;
-  private _startPromise: Promise<void> | null = null;
-  private _mongoHost     = '127.0.0.1';
-  private _mongoPort     = 27017;
-  private _proxies       = new Map<number, MongoProxyConnection>();
-  /** Captured before TcpInterceptor.install() patches net.createConnection. */
+  private readonly _host: string;
+  private readonly _port: number;
+  private readonly _dbName: string;
+  private _proxies = new Map<number, MongoProxyConnection>();
+  /** Captured before TcpInterceptor patches net.createConnection. */
   private _realConnect: (port: number, host: string) => net.Socket;
+  /** Lazily created MongoClient for assertion methods (find, drop). */
+  private _clientPromise: Promise<import('mongodb').MongoClient> | null = null;
 
-  constructor() {
-    this.store = new MongoStore();
-    // Capture the REAL net.createConnection now, before TcpInterceptor patches it.
-    const orig = net.createConnection.bind(net) as unknown as (port: number, host: string) => net.Socket;
-    this._realConnect = orig;
+  constructor(opts?: MongoMockOpts) {
+    this._host   = opts?.mongoHost   ?? '127.0.0.1';
+    this._port   = opts?.mongoPort   ?? 27017;
+    this._dbName = opts?.mongoDbName ?? 'test';
+    // Capture REAL net.createConnection before TcpInterceptor patches it.
+    this._realConnect = net.createConnection.bind(net) as unknown as (port: number, host: string) => net.Socket;
+  }
+
+  // ── Assertion API ───────────────────────────────────────────────────────────
+
+  /**
+   * Query the scenario's MongoDB database directly via the driver.
+   * Returns plain objects (EJSON-decoded by the driver).
+   */
+  async find(collection: string, filter: Record<string, unknown> = {}): Promise<Record<string, unknown>[]> {
+    const client = await this._getClient();
+    return client.db(this._dbName).collection(collection).find(filter).toArray() as Promise<Record<string, unknown>[]>;
   }
 
   /**
-   * Start the embedded MongoDB process (idempotent — safe to call multiple times).
-   * Called lazily by createHandler() on the first connection, so scenarios that
-   * don't use MongoDB pay zero startup cost.
+   * Drop the scenario's database and close the driver connection.
+   * Called in the worker's finally block for clean isolation.
    */
-  async start(): Promise<void> {
-    if (this._startPromise) return this._startPromise;
-    this._startPromise = (async () => {
-      const { MongoMemoryServer } = await import('mongodb-memory-server');
-      this._server = await MongoMemoryServer.create();
-      const uri    = this._server.getUri();
-      const url    = new URL(uri);
-      this._mongoHost = url.hostname;
-      this._mongoPort = parseInt(url.port, 10);
-    })();
-    return this._startPromise;
-  }
-
-  /** Stop the embedded MongoDB process and tear down all proxy connections. */
-  async stop(): Promise<void> {
+  async drop(): Promise<void> {
+    if (!this._clientPromise) return;
+    try {
+      const client = await this._clientPromise;
+      await client.db(this._dbName).dropDatabase();
+      await client.close();
+    } catch { /* ignore if db was never used */ }
+    this._clientPromise = null;
     for (const p of this._proxies.values()) p.destroy();
     this._proxies.clear();
-    if (this._server) {
-      await this._server.stop();
-      this._server = null;
-      this._startPromise = null;
-    }
   }
+
+  // ── TCP handler ─────────────────────────────────────────────────────────────
 
   /**
    * Returns a TcpMockHandler that proxies raw MongoDB wire-protocol bytes to
-   * the real mongod.  The Promise return type lets the caller (TcpInterceptor /
-   * Scheduler) inject virtual latency before delivering the response.
+   * the shared mongod.  Latency injection is handled by TcpInterceptor.
    */
   createHandler(): TcpMockHandler {
     return async (data: Buffer, ctx: TcpMockContext): Promise<TcpHandlerResult> => {
-      // Lazy-start mongod on the first connection to this handler
-      await this.start();
       if (!this._proxies.has(ctx.socketId)) {
         this._proxies.set(
           ctx.socketId,
-          new MongoProxyConnection(this._mongoHost, this._mongoPort, this._realConnect),
+          new MongoProxyConnection(this._host, this._port, this._realConnect),
         );
       }
       const proxy = this._proxies.get(ctx.socketId)!;
@@ -463,5 +413,16 @@ export class MongoMock {
         return null;
       }
     };
+  }
+
+  // ── private ─────────────────────────────────────────────────────────────────
+
+  private _getClient(): Promise<import('mongodb').MongoClient> {
+    if (!this._clientPromise) {
+      this._clientPromise = import('mongodb').then(({ MongoClient }) =>
+        MongoClient.connect(`mongodb://${this._host}:${this._port}`),
+      );
+    }
+    return this._clientPromise;
   }
 }

@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { VirtualSocket } from './VirtualSocket.js';
 import { patchDns, registerMockedHost, clearMockedHosts, dnsConfig } from './dns.js';
 import type { IClock, IScheduler, TcpMockConfig, TcpMockHandler } from './types.js';
-import { SimNodeUnmockedTCPConnectionError } from './types.js';
+import { SimNodeUnmockedTCPConnectionError, SimNodeUnsupportedProtocolError } from './types.js';
 
 // CJS reference for mutable patching (same technique as @simnode/http-proxy)
 const _require = createRequire(import.meta.url);
@@ -306,6 +306,9 @@ export class TcpInterceptor {
         { code: 'ECONNREFUSED' },
       );
     }
+
+    // Explicitly unsupported protocols — give a clear, actionable error
+    if (port === 3306) throw new SimNodeUnsupportedProtocolError('MySQL');
 
     const key = `${host}:${port}`;
     const config = this._mocks.get(key);

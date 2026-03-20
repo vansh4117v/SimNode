@@ -55,3 +55,14 @@ export class SimNodeUnmockedTCPConnectionError extends Error {
     this.name = 'SimNodeUnmockedTCPConnectionError';
   }
 }
+
+/** Thrown when a connection to an explicitly unsupported protocol port is attempted. */
+export class SimNodeUnsupportedProtocolError extends Error {
+  constructor(protocol: string) {
+    super(
+      `SimNode: ${protocol} is not supported in v1.0. ` +
+      `Only PostgreSQL (5432), Redis (6379), and MongoDB (27017) are available.`,
+    );
+    this.name = 'SimNodeUnsupportedProtocolError';
+  }
+}
