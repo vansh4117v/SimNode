@@ -31,7 +31,6 @@
     "@simnode/random": "*",
     "@simnode/redis-mock": "*",
     "@simnode/scheduler": "*",
-    "@simnode/tcp": "*",
-    "redis-memory-server": "^0.16.0"
+    "@simnode/tcp": "*"
   }
 }

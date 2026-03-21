@@ -162,18 +162,13 @@ export interface MongoOpts {
   mongoDbName: string;
 }
 
-export interface RedisOpts {
-  redisHost: string;
-  redisPort: number;
-}
-
 /**
  * Build a fresh, isolated SimEnv for one scenario run.
  * mongoOpts receives the host/port of the shared MongoMemoryServer started
  * by Simulation.run() and a per-scenario db name for isolation.
- * redisOpts receives the host/port of the shared RedisMemoryServer.
+ * Redis is fully in-memory (ioredis-mock) — no external server needed.
  */
-export async function createEnv(seed: number, mongoOpts?: MongoOpts, redisOpts?: RedisOpts): Promise<SimEnv> {
+export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<SimEnv> {
   const clock = new VirtualClock(0);
   const random = new SeededRandom(seed);
   const scheduler = new Scheduler({ prngSeed: seed });
@@ -185,7 +180,7 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts, redisOpts?:
   const timeline = new Timeline();
 
   const pg = new PgMock();
-  const redis = new RedisMock(redisOpts);
+  const redis = new RedisMock();
   const mongo = new MongoMock(mongoOpts);
 
   const env: SimEnv = {

@@ -28,8 +28,6 @@ interface WorkerInput {
   mongoHost: string;
   mongoPort: number;
   mongoDbName: string;
-  redisHost: string;
-  redisPort: number;
   /** File-based scenario: absolute path to an ES module. */
   scenarioPath?: string;
   /** Inline legacy scenario: serialised function source. */
@@ -38,12 +36,12 @@ interface WorkerInput {
 
 const { seed, scenarioName, timeout,
         mongoHost, mongoPort, mongoDbName,
-        redisHost, redisPort,
         scenarioPath, fnSource } = workerData as WorkerInput;
 
 async function main(): Promise<void> {
-  // Build a fresh env — MongoMock and RedisMock receive external host/port (servers started by Simulation)
-  const env = await createEnv(seed, { mongoHost, mongoPort, mongoDbName }, { redisHost, redisPort });
+  // Build a fresh env — MongoMock proxies to shared MongoMemoryServer,
+  // RedisMock is fully in-memory (ioredis-mock, no external process).
+  const env = await createEnv(seed, { mongoHost, mongoPort, mongoDbName });
 
   // Wire clock → scheduler so advance() drives all I/O completions
   env.clock.onTick = async (t: number) => {

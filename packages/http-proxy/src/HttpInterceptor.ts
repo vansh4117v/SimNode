@@ -244,22 +244,30 @@ export class HttpInterceptor {
 
     const self = this;
 
-    const makeRequest = (proto: string) =>
-      function fakeRequest(this: unknown, ...args: unknown[]): FakeClientRequest {
+    const origHttpReq  = this._origHttpRequest!;
+    const origHttpsReq = this._origHttpsRequest!;
+
+    const makeRequest = (proto: string, origReq: typeof http.request) =>
+      function fakeRequest(this: unknown, ...args: unknown[]): FakeClientRequest | http.ClientRequest {
         const { url, method, headers, callback } = normalizeArgs(proto, args);
+        // Passthrough: unmatched localhost requests (supertest, local test
+        // servers) go through the real http stack instead of emitting an error.
+        if (!self._partitioned && !self._routes.find(r => r.matches(url)) && _isLocalUrl(url)) {
+          return origReq.apply(null, args as any);
+        }
         return self._intercept(url, method, headers, callback);
       } as unknown as typeof http.request;
 
     const makeGet = (reqFn: typeof http.request) =>
-      function fakeGet(this: unknown, ...args: unknown[]): FakeClientRequest {
-        const req = (reqFn as any)(...args) as FakeClientRequest;
+      function fakeGet(this: unknown, ...args: unknown[]): FakeClientRequest | http.ClientRequest {
+        const req = (reqFn as any)(...args);
         req.end();
         return req;
       } as unknown as typeof http.get;
 
-    httpCjs.request = makeRequest('http:');
+    httpCjs.request = makeRequest('http:', origHttpReq);
     httpCjs.get = makeGet(httpCjs.request);
-    httpsCjs.request = makeRequest('https:');
+    httpsCjs.request = makeRequest('https:', origHttpsReq);
     httpsCjs.get = makeGet(httpsCjs.request);
   }
 
@@ -355,6 +363,16 @@ export class HttpInterceptor {
 }
 
 // Helpers
+
+/** Return true if the URL targets a loopback address (localhost, 127.0.0.1, ::1). */
+function _isLocalUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+  } catch {
+    return false;
+  }
+}
 
 function normalizeArgs(
   defaultProto: string,

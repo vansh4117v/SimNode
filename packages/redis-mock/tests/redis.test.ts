@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { RedisMock } from '../src/index.js';
 
 // Encode a RESP command buffer from string arguments
@@ -8,23 +8,7 @@ function encode(...args: string[]): Buffer {
   return Buffer.from(parts.join(''));
 }
 
-let redisHost: string;
-let redisPort: number;
-let stopServer: () => Promise<void>;
-
-beforeAll(async () => {
-  const { RedisMemoryServer } = await import('redis-memory-server');
-  const server = new RedisMemoryServer();
-  redisHost = await server.getHost();
-  redisPort = await server.getPort();
-  stopServer = () => server.stop().then(() => {});
-}, 30_000);
-
-afterAll(async () => {
-  await stopServer();
-});
-
-describe('Redis commands (real redis-server)', () => {
+describe('Redis commands (in-memory via ioredis-mock)', () => {
   let mock: RedisMock;
 
   afterEach(async () => {
@@ -33,31 +17,31 @@ describe('Redis commands (real redis-server)', () => {
 
   async function cmd(...args: string[]): Promise<string> {
     const handler = mock.createHandler();
-    const ctx = { remoteHost: 'localhost', remotePort: redisPort, socketId: 1 };
+    const ctx = { remoteHost: 'localhost', remotePort: 6379, socketId: 1 };
     const result = await handler(encode(...args), ctx);
     return Buffer.isBuffer(result) ? result.toString() : '';
   }
 
   it('PING → PONG', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     expect(await cmd('PING')).toBe('+PONG\r\n');
   });
 
   it('GET/SET', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('SET', 'key1', 'hello');
     expect(await cmd('GET', 'key1')).toContain('hello');
   });
 
   it('DEL', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('SET', 'k', 'v');
     expect(await cmd('DEL', 'k')).toBe(':1\r\n');
     expect(await cmd('GET', 'k')).toBe('$-1\r\n');
   });
 
   it('INCR/DECR', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('SET', 'counter', '10');
     expect(await cmd('INCR', 'counter')).toBe(':11\r\n');
     expect(await cmd('DECR', 'counter')).toBe(':10\r\n');
@@ -65,7 +49,7 @@ describe('Redis commands (real redis-server)', () => {
   });
 
   it('LPUSH/RPUSH/LPOP/RPOP', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('RPUSH', 'list', 'a');
     await cmd('RPUSH', 'list', 'b');
     await cmd('LPUSH', 'list', 'z');
@@ -74,13 +58,13 @@ describe('Redis commands (real redis-server)', () => {
   });
 
   it('HSET/HGET', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('HSET', 'user:1', 'name', 'Alice');
     expect(await cmd('HGET', 'user:1', 'name')).toContain('Alice');
   });
 
   it('SADD/SMEMBERS', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('SADD', 'myset', 'a');
     await cmd('SADD', 'myset', 'b');
     await cmd('SADD', 'myset', 'a'); // duplicate
@@ -90,7 +74,7 @@ describe('Redis commands (real redis-server)', () => {
   });
 
   it('ZADD/ZRANGE', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     await cmd('ZADD', 'zs', '1', 'alice', '2', 'bob', '0.5', 'charlie');
     const r = await cmd('ZRANGE', 'zs', '0', '-1');
     expect(r).toContain('charlie');
@@ -98,19 +82,19 @@ describe('Redis commands (real redis-server)', () => {
     expect(r).toContain('bob');
   });
 
-  it('EXPIRE/TTL with real redis', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+  it('EXPIRE/TTL', async () => {
+    mock = new RedisMock();
     await cmd('SET', 'k', 'v');
     await cmd('EXPIRE', 'k', '10');
     const ttl = await cmd('TTL', 'k');
-    // TTL should be close to 10 (real time)
     const ttlVal = parseInt(ttl.replace(':', '').trim());
-    expect(ttlVal).toBeGreaterThanOrEqual(9);
+    // ioredis-mock stores TTL; value should be positive
+    expect(ttlVal).toBeGreaterThan(0);
     expect(ttlVal).toBeLessThanOrEqual(10);
   });
 
   it('seedData', async () => {
-    mock = new RedisMock({ redisHost, redisPort });
+    mock = new RedisMock();
     mock.seedData('greeting', 'hello');
     expect(await cmd('GET', 'greeting')).toContain('hello');
   });

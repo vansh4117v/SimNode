@@ -2,6 +2,9 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
+const _require = createRequire(import.meta.url);
 
 // Re-export shared types so consumers import from a single entry point.
 export type { SimEnv, TimelineEvent } from './env.js';
@@ -28,6 +31,27 @@ function _resolveWorkerScript(): string {
   return found;
 }
 const WORKER_SCRIPT = _resolveWorkerScript();
+
+/**
+ * Resolve a scenario path with extension fallback.
+ * If the given path exists, use it as-is.  Otherwise try swapping / appending
+ * common extensions (.ts ↔ .js, .mjs, .cjs) so users don't need to worry
+ * about whether their scenario has been compiled yet.
+ */
+function _resolveScenarioPath(raw: string): string {
+  const abs = resolve(raw);
+  if (existsSync(abs)) return abs;
+
+  // Strip the current extension (if any) and try alternatives
+  const base = abs.replace(/\.(ts|js|mjs|cjs)$/, '');
+  for (const ext of ['.ts', '.js', '.mjs', '.cjs']) {
+    const candidate = base + ext;
+    if (existsSync(candidate)) return candidate;
+  }
+
+  // Nothing found — return the original so the error message is clear
+  return abs;
+}
 
 interface ScenarioDef {
   name: string;
@@ -91,7 +115,7 @@ export class Simulation {
    */
   scenario(name: string, fnOrPath: string | ((env: import('./env.js').SimEnv) => Promise<void>)): void {
     if (typeof fnOrPath === 'string') {
-      this._scenarios.push({ name, path: resolve(fnOrPath) });
+      this._scenarios.push({ name, path: _resolveScenarioPath(fnOrPath) });
     } else {
       this._scenarios.push({ name, fn: fnOrPath });
     }
@@ -102,12 +126,12 @@ export class Simulation {
     const stopOnFirst = opts?.stopOnFirstFailure ?? true;
     const failures: ScenarioResult[] = [];
     let passes = 0;
-    const [mongo, redis] = await Promise.all([_startMongo(), _startRedis()]);
+    const mongo = await _startMongo();
     try {
       outer: for (let s = 0; s < seedCount; s++) {
         const seed = this._baseSeed + s;
         for (const scenario of this._scenarios) {
-          const r = await this._runScenario(scenario, seed, mongo, redis);
+          const r = await this._runScenario(scenario, seed, mongo);
           if (r.passed) {
             passes++;
           } else {
@@ -117,7 +141,7 @@ export class Simulation {
         }
       }
     } finally {
-      await Promise.all([_stopMongo(mongo), _stopRedis(redis)]);
+      await _stopMongo(mongo);
     }
     return { passed: failures.length === 0, passes, failures };
   }
@@ -125,12 +149,12 @@ export class Simulation {
   async replay(opts: { seed: number; scenario: string }): Promise<ReplayResult> {
     const found = this._scenarios.find(s => s.name === opts.scenario);
     if (!found) throw new Error(`Scenario not found: ${opts.scenario}`);
-    const [mongo, redis] = await Promise.all([_startMongo(), _startRedis()]);
+    const mongo = await _startMongo();
     try {
-      const r = await this._runScenario(found, opts.seed, mongo, redis);
+      const r = await this._runScenario(found, opts.seed, mongo);
       return { passed: r.passed, result: r };
     } finally {
-      await Promise.all([_stopMongo(mongo), _stopRedis(redis)]);
+      await _stopMongo(mongo);
     }
   }
 
@@ -150,13 +174,13 @@ export class Simulation {
     const deadline  = Date.now() + timeoutMs;
     const start     = Date.now();
     let seedsRun    = 0;
-    const [mongo, redis] = await Promise.all([_startMongo(), _startRedis()]);
+    const mongo = await _startMongo();
     try {
       for (let seed = this._baseSeed; Date.now() < deadline; seed++) {
         if (opts?.signal?.aborted) break;
         for (const scenario of this._scenarios) {
           if (opts?.signal?.aborted) break;
-          const r = await this._runScenario(scenario, seed, mongo, redis);
+          const r = await this._runScenario(scenario, seed, mongo);
           seedsRun++;
           opts?.onProgress?.(seed, r.passed);
           if (!r.passed) {
@@ -165,12 +189,12 @@ export class Simulation {
         }
       }
     } finally {
-      await Promise.all([_stopMongo(mongo), _stopRedis(redis)]);
+      await _stopMongo(mongo);
     }
     return { failure: null, seedsRun, elapsedMs: Date.now() - start };
   }
 
-  private async _runScenario(scenario: ScenarioDef, seed: number, mongo: MongoServerInfo, redis: RedisServerInfo): Promise<WorkerResult> {
+  private async _runScenario(scenario: ScenarioDef, seed: number, mongo: MongoServerInfo): Promise<WorkerResult> {
     const workerPayload: Record<string, unknown> = {
       seed,
       scenarioName: scenario.name,
@@ -178,8 +202,6 @@ export class Simulation {
       mongoHost: mongo.host,
       mongoPort: mongo.port,
       mongoDbName: `sim_db_${seed}`,
-      redisHost: redis.host,
-      redisPort: redis.port,
     };
 
     if (scenario.path) {
@@ -231,23 +253,31 @@ export class Simulation {
 interface MongoServerInfo {
   host: string;
   port: number;
+  started: boolean;
   stop: () => Promise<void>;
 }
 
 async function _startMongo(): Promise<MongoServerInfo> {
   try {
-    const { MongoMemoryServer } = await import('mongodb-memory-server');
+    // Use CJS require — mongodb-memory-server is a CJS package that
+    // uses require('path') internally, which fails under ESM import().
+    const { MongoMemoryServer } = _require('mongodb-memory-server') as typeof import('mongodb-memory-server');
     const server = await MongoMemoryServer.create();
     const uri = server.getUri();
     const url = new URL(uri);
     return {
       host: url.hostname,
       port: parseInt(url.port, 10),
+      started: true,
       stop: () => server.stop().then(() => {}),
     };
-  } catch {
-    // mongodb-memory-server not available — return a sentinel that disables mongo
-    return { host: '127.0.0.1', port: 27017, stop: async () => {} };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[SimNode] MongoDB memory server failed to start: ${msg}\n` +
+      `  Scenarios that use MongoDB will fail. Install mongodb-memory-server or check its binary.`,
+    );
+    return { host: '127.0.0.1', port: 27017, started: false, stop: async () => {} };
   }
 }
 
@@ -255,31 +285,5 @@ async function _stopMongo(info: MongoServerInfo): Promise<void> {
   try { await info.stop(); } catch { /* ignore */ }
 }
 
-// ── Redis server lifecycle (one server per Simulation.run()) ──────────────────
-
-interface RedisServerInfo {
-  host: string;
-  port: number;
-  stop: () => Promise<void>;
-}
-
-async function _startRedis(): Promise<RedisServerInfo> {
-  try {
-    const { RedisMemoryServer } = await import('redis-memory-server');
-    const server = new RedisMemoryServer();
-    const host = await server.getHost();
-    const port = await server.getPort();
-    return {
-      host,
-      port,
-      stop: () => server.stop().then(() => {}),
-    };
-  } catch {
-    // redis-memory-server not available — return a sentinel that disables redis
-    return { host: '127.0.0.1', port: 6379, stop: async () => {} };
-  }
-}
-
-async function _stopRedis(info: RedisServerInfo): Promise<void> {
-  try { await info.stop(); } catch { /* ignore */ }
-}
+// Redis is now fully in-memory (ioredis-mock inside @simnode/redis-mock).
+// No external server lifecycle needed.

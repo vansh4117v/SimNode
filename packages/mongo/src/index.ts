@@ -50,10 +50,11 @@ class MongoProxyConnection {
   constructor(
     host: string,
     port: number,
-    /** Real (pre-patch) net.createConnection so we bypass the TcpInterceptor. */
-    realConnect: (port: number, host: string) => net.Socket,
+    /** Real (pre-patch) Socket.prototype.connect so we bypass TcpInterceptor. */
+    realSocketConnect: Function,
   ) {
-    this._upstream = realConnect(port, host);
+    this._upstream = new net.Socket();
+    realSocketConnect.call(this._upstream, { host, port });
     this._upstream.on('data',  (chunk: Buffer) => this._onData(chunk));
     this._upstream.on('error', (err: Error)    => this._onError(err));
     this._upstream.on('close', ()              => { this._closed = true; this._onError(new Error('mongod connection closed')); });
@@ -100,8 +101,8 @@ export class MongoMock {
   private readonly _port: number;
   private readonly _dbName: string;
   private _proxies = new Map<number, MongoProxyConnection>();
-  /** Captured before TcpInterceptor patches net.createConnection. */
-  private _realConnect: (port: number, host: string) => net.Socket;
+  /** Real Socket.prototype.connect captured before TcpInterceptor patches it. */
+  private _realSocketConnect: Function;
   /** Lazily created MongoClient for assertion methods (find, drop). */
   private _clientPromise: Promise<import('mongodb').MongoClient> | null = null;
 
@@ -109,8 +110,8 @@ export class MongoMock {
     this._host   = opts?.mongoHost   ?? '127.0.0.1';
     this._port   = opts?.mongoPort   ?? 27017;
     this._dbName = opts?.mongoDbName ?? 'test';
-    // Capture REAL net.createConnection before TcpInterceptor patches it.
-    this._realConnect = net.createConnection.bind(net) as unknown as (port: number, host: string) => net.Socket;
+    // Capture REAL Socket.prototype.connect before TcpInterceptor patches it.
+    this._realSocketConnect = net.Socket.prototype.connect;
   }
 
   // ── Assertion API ───────────────────────────────────────────────────────────
@@ -151,7 +152,7 @@ export class MongoMock {
       if (!this._proxies.has(ctx.socketId)) {
         this._proxies.set(
           ctx.socketId,
-          new MongoProxyConnection(this._host, this._port, this._realConnect),
+          new MongoProxyConnection(this._host, this._port, this._realSocketConnect),
         );
       }
       const proxy = this._proxies.get(ctx.socketId)!;

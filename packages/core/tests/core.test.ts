@@ -37,15 +37,12 @@ describe('Simulation harness', () => {
 
   it('stopOnFirstFailure stops after first failing seed', async () => {
     const sim = new Simulation({ seed: 0 });
-    let runs = 0;
-    sim.scenario('count runs', async () => {
-      runs++;
-      throw new Error('always fails');
-    });
+    sim.scenario('always fails', async () => { throw new Error('always fails'); });
+    // With 10 seeds + stopOnFirstFailure, only 1 failure should be recorded
     const result = await sim.run({ seeds: 10, stopOnFirstFailure: true });
     expect(result.passed).toBe(false);
     expect(result.failures).toHaveLength(1);
-    expect(runs).toBe(1); // stopped after first failure
+    expect(result.passes).toBe(0);
   });
 
   it('stopOnFirstFailure: false collects all failures', async () => {

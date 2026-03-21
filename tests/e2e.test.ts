@@ -98,53 +98,37 @@ describe('Scheduler + PG mock ordering', () => {
 /* ── B) Redis concurrent INCR ──────────────────────── */
 
 describe('Redis concurrent INCR', () => {
-  let redisHost: string;
-  let redisPort: number;
-  let stopRedis: () => Promise<void>;
-
-  // Start a real redis-server for this describe block
   it('deterministic INCR sequence by seed', async () => {
-    const { RedisMemoryServer } = await import('redis-memory-server');
-    const server = new RedisMemoryServer();
-    redisHost = await server.getHost();
-    redisPort = await server.getPort();
-    stopRedis = () => server.stop().then(() => {});
+    async function runWithSeed(seed: number): Promise<string[]> {
+      const clock = new VirtualClock(0);
+      const scheduler = new Scheduler({ prngSeed: seed });
+      const redis = new RedisMock();
+      const tcp = new TcpInterceptor({ clock, scheduler });
+      tcp.mock('localhost:6379', { handler: redis.createHandler(), latency: 5 });
+      tcp.install();
 
-    try {
-      async function runWithSeed(seed: number): Promise<string[]> {
-        const clock = new VirtualClock(0);
-        const scheduler = new Scheduler({ prngSeed: seed });
-        // Create RedisMock BEFORE installing TcpInterceptor so it captures real net.createConnection
-        const redis = new RedisMock({ redisHost, redisPort });
-        const tcp = new TcpInterceptor({ clock, scheduler });
-        tcp.mock('localhost:6379', { handler: redis.createHandler(), latency: 5 });
-        tcp.install();
+      const results: string[] = [];
+      const s1 = await tcpConnect(6379);
+      const s2 = await tcpConnect(6379);
 
-        const results: string[] = [];
-        const s1 = await tcpConnect(6379);
-        const s2 = await tcpConnect(6379);
+      s1.on('data', (d: Buffer) => results.push('s1:' + d.toString().trim()));
+      s2.on('data', (d: Buffer) => results.push('s2:' + d.toString().trim()));
 
-        s1.on('data', (d: Buffer) => results.push('s1:' + d.toString().trim()));
-        s2.on('data', (d: Buffer) => results.push('s2:' + d.toString().trim()));
+      s1.write(redisCmd('INCR', 'counter'));
+      s2.write(redisCmd('INCR', 'counter'));
 
-        s1.write(redisCmd('INCR', 'counter'));
-        s2.write(redisCmd('INCR', 'counter'));
+      await scheduler.runTick(5);
+      await new Promise(r => setTimeout(r, 10));
 
-        await scheduler.runTick(5);
-        await new Promise(r => setTimeout(r, 10));
-
-        s1.destroy(); s2.destroy();
-        tcp.uninstall();
-        await redis.flush();
-        return results;
-      }
-
-      const r1 = await runWithSeed(42);
-      const r2 = await runWithSeed(42);
-      expect(r1).toEqual(r2);
-    } finally {
-      await stopRedis();
+      s1.destroy(); s2.destroy();
+      tcp.uninstall();
+      await redis.flush();
+      return results;
     }
+
+    const r1 = await runWithSeed(42);
+    const r2 = await runWithSeed(42);
+    expect(r1).toEqual(r2);
   }, 30_000);
 });
 

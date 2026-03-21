@@ -57,6 +57,9 @@ export class TcpInterceptor {
   /** Auto-incrementing socket ID for local server connections (offset to avoid collision with VirtualSocket IDs). */
   private _nextLocalSocketId = 100_000;
 
+  /** Keys that have ever been registered via mock() during this interceptor's lifetime. */
+  private _everMockedKeys = new Set<string>();
+
   constructor(opts?: TcpInterceptorOptions) {
     this._clock = opts?.clock;
     this._scheduler = opts?.scheduler;
@@ -73,6 +76,7 @@ export class TcpInterceptor {
   mock(target: string, config: TcpMockConfig): this {
     const key = normalizeTarget(target);
     this._mocks.set(key, config);
+    this._everMockedKeys.add(key);
     const hostname = key.split(':')[0];
     if (hostname) registerMockedHost(hostname);
     return this;
@@ -250,8 +254,16 @@ export class TcpInterceptor {
     const fakeCreateConnection = function (
       this: unknown,
       ...args: unknown[]
-    ): VirtualSocket {
+    ): VirtualSocket | net.Socket {
       const { host, port } = normalizeNetArgs(args);
+      // Passthrough: unmocked localhost connections use real sockets.
+      // This allows supertest, local test servers, etc. to work.
+      // Only truly unknown ports pass through — ports that were ever
+      // registered via mock() still go through the interceptor.
+      const key = `${normalizeHost(host)}:${port}`;
+      if (!self._mocks.has(key) && !self._everMockedKeys.has(key) && normalizeHost(host) === 'localhost') {
+        return self._origCreateConnection!.apply(null, args as any);
+      }
       return self._intercept(host, port);
     } as unknown as typeof net.createConnection;
 
@@ -265,6 +277,11 @@ export class TcpInterceptor {
       ...args: unknown[]
     ): net.Socket {
       const { host, port } = normalizeNetArgs(args);
+      // Passthrough: unmocked localhost connections use real sockets.
+      const key = `${normalizeHost(host)}:${port}`;
+      if (!self._mocks.has(key) && !self._everMockedKeys.has(key) && normalizeHost(host) === 'localhost') {
+        return self._origSocketConnect!.apply(this, args as any);
+      }
       const vs = self._intercept(host, port);
       // Copy event listeners from the real Socket to the VirtualSocket
       // (in case the consumer attached listeners before calling .connect())
