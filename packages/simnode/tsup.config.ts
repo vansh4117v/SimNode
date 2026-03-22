@@ -1,10 +1,10 @@
-import { defineConfig } from 'tsup';
+import { defineConfig } from "tsup";
 export default defineConfig({
-  entry: ['src/index.ts', 'src/cli.ts'],
-  format: ['esm', 'cjs'],
+  entry: ["src/index.ts", "src/cli.ts"],
+  format: ["esm", "cjs"],
   dts: false,
   clean: true,
   shims: true,
   sourcemap: true,
-  external: ['@simnode/core'],
+  external: ["@simnode/core"],
 });

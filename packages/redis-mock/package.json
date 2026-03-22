@@ -17,8 +17,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
-    "clean": "rimraf dist"
+    "build": "tsup && tsc --build tsconfig.json --force",
+    "clean": "rimraf dist",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "ioredis-mock": "^8.13.1"

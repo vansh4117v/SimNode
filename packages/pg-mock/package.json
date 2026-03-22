@@ -17,8 +17,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
-    "clean": "rimraf dist"
+    "build": "tsup && tsc --build tsconfig.json --force",
+    "clean": "rimraf dist",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.2.0"
