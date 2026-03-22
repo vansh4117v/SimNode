@@ -1,0 +1,33 @@
+{
+  "name": "simnode",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "simnode": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@simnode/core": "0.1.0",
+    "@simnode/mongo": "0.1.0",
+    "@simnode/pg-mock": "0.1.0",
+    "@simnode/redis-mock": "0.1.0",
+    "mongodb-memory-server": "^10.0.0"
+  }
+}

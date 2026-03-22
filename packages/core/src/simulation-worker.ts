@@ -182,8 +182,8 @@ async function main(): Promise<void> {
     env.fs.uninstall();
     await env.tcp.stopLocalServers();
     // Drop the scenario's MongoDB database and flush Redis for clean isolation
-    try { await env.mongo.drop(); } catch { /* mongo may not have been used */ }
-    try { await env.redis.flush(); } catch { /* redis may not have been used */ }
+    try { await env.mongo?.drop(); } catch { /* mongo may not have been used */ }
+    try { await env.redis?.flush(); } catch { /* redis may not have been used */ }
   }
 
   parentPort!.postMessage({

@@ -1,5 +1,5 @@
 {
-  "name": "simnode",
+  "name": "@simnode/core",
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
@@ -14,6 +14,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./cli": {
+      "import": "./dist/cli.js",
+      "require": "./dist/cli.cjs"
     }
   },
   "files": [
@@ -27,12 +31,20 @@
     "@simnode/clock": "0.1.0",
     "@simnode/filesystem": "0.1.0",
     "@simnode/http-proxy": "0.1.0",
-    "@simnode/mongo": "0.1.0",
-    "@simnode/pg-mock": "0.1.0",
     "@simnode/random": "0.1.0",
-    "@simnode/redis-mock": "0.1.0",
     "@simnode/scheduler": "0.1.0",
-    "@simnode/tcp": "0.1.0",
-    "mongodb-memory-server": "^10.0.0"
+    "@simnode/tcp": "0.1.0"
+  },
+  "peerDependencies": {
+    "@simnode/mongo": ">=0.1.0",
+    "@simnode/pg-mock": ">=0.1.0",
+    "@simnode/redis-mock": ">=0.1.0",
+    "mongodb-memory-server": ">=10.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@simnode/mongo": { "optional": true },
+    "@simnode/pg-mock": { "optional": true },
+    "@simnode/redis-mock": { "optional": true },
+    "mongodb-memory-server": { "optional": true }
   }
 }

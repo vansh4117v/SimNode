@@ -3,7 +3,7 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [
-    ["simnode", "@simnode/clock", "@simnode/filesystem", "@simnode/http-proxy",
+    ["simnode", "@simnode/core", "@simnode/clock", "@simnode/filesystem", "@simnode/http-proxy",
      "@simnode/mongo", "@simnode/pg-mock", "@simnode/random", "@simnode/redis-mock",
      "@simnode/scheduler", "@simnode/tcp"]
   ],

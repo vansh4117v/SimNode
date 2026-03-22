@@ -25,7 +25,7 @@ function _resolveWorkerScript(): string {
     throw new Error(
       `SimNode: Cannot locate simulation-worker.js. Searched:\n` +
       candidates.map(p => `  - ${p}`).join('\n') +
-      `\nRun \`npm run build\` in the simnode package first.`,
+      `\nRun \`npm run build\` in @simnode/core first.`,
     );
   }
   return found;
@@ -182,10 +182,6 @@ export class Simulation {
           if (opts?.signal?.aborted) break;
           const r = await this._runScenario(scenario, seed, mongo);
           seedsRun++;
-          // If abort was signalled while this seed was in-flight, its failure
-          // is an interruption artifact (e.g. "interrupted at shutdown") —
-          // not a genuine bug.  Exit cleanly without reporting a failure.
-          if (opts?.signal?.aborted) break;
           opts?.onProgress?.(seed, r.passed);
           if (!r.passed) {
             return { failure: r, seedsRun, elapsedMs: Date.now() - start };

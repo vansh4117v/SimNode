@@ -5,9 +5,6 @@ import { Scheduler } from '@simnode/scheduler';
 import { HttpInterceptor } from '@simnode/http-proxy';
 import { TcpInterceptor } from '@simnode/tcp';
 import { VirtualFS } from '@simnode/filesystem';
-import type { PgMock } from '@simnode/pg-mock';
-import type { RedisMock } from '@simnode/redis-mock';
-import type { MongoMock } from '@simnode/mongo';
 import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
@@ -30,6 +27,29 @@ export class Timeline {
   }
 }
 
+// ── Optional-mock interfaces ─────────────────────────────────────────────────
+// Defined locally so @simnode/core has zero type-level dependency on the heavy
+// mock packages.  The concrete classes (@simnode/pg-mock etc.) satisfy these
+// interfaces via TypeScript structural typing.
+
+export interface PgMockLike {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
+  seedData(table: string, rows: Record<string, unknown>[]): void;
+  ready(): Promise<void>;
+  createHandler(): import('@simnode/tcp').TcpMockHandler;
+}
+
+export interface RedisMockLike {
+  flush(): Promise<void>;
+  createHandler(): import('@simnode/tcp').TcpMockHandler;
+}
+
+export interface MongoMockLike {
+  find(collection: string, filter?: Record<string, unknown>): Promise<Record<string, unknown>[]>;
+  drop(): Promise<void>;
+  createHandler(): import('@simnode/tcp').TcpMockHandler;
+}
+
 // ── SimEnv ────────────────────────────────────────────────────────────────────
 
 export interface SimEnv {
@@ -40,9 +60,12 @@ export interface SimEnv {
   http: HttpInterceptor;
   tcp: TcpInterceptor;
   fs: VirtualFS;
-  pg: PgMock;
-  redis: RedisMock;
-  mongo: MongoMock;
+  /** null when @simnode/pg-mock is not installed */
+  pg: PgMockLike | null;
+  /** null when @simnode/redis-mock is not installed */
+  redis: RedisMockLike | null;
+  /** null when @simnode/mongo is not installed */
+  mongo: MongoMockLike | null;
   faults: FaultInjector;
   timeline: Timeline;
   /**
@@ -188,20 +211,29 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
 
   const timeline = new Timeline();
 
-  // Heavy mock packages — loaded lazily so importing env.ts never triggers
-  // PGlite WASM init, ioredis-mock, or mongodb-memory-server at module-load time.
-  const [{ PgMock }, { RedisMock }, { MongoMock }] = await Promise.all([
-    import('@simnode/pg-mock'),
-    import('@simnode/redis-mock'),
-    import('@simnode/mongo'),
-  ]);
+  // Heavy mock packages — loaded lazily and optionally.  Each is wrapped in a
+  // try/catch so @simnode/core works even when a mock is not installed.
+  let pg: PgMockLike | null = null;
+  let redis: RedisMockLike | null = null;
+  let mongo: MongoMockLike | null = null;
 
-  const pg = new PgMock();
-  // Ensure PGlite WASM is fully initialised BEFORE determinism patches
-  // replace setTimeout — PGlite's init may use real timers internally.
-  await pg.ready();
-  const redis = new RedisMock();
-  const mongo = new MongoMock(mongoOpts);
+  try {
+    const { PgMock } = await import('@simnode/pg-mock');
+    pg = new PgMock();
+    // Ensure PGlite WASM is fully initialised BEFORE determinism patches
+    // replace setTimeout — PGlite's init may use real timers internally.
+    await (pg as { ready(): Promise<void> }).ready();
+  } catch { /* @simnode/pg-mock not installed — pg stays null */ }
+
+  try {
+    const { RedisMock } = await import('@simnode/redis-mock');
+    redis = new RedisMock();
+  } catch { /* @simnode/redis-mock not installed — redis stays null */ }
+
+  try {
+    const { MongoMock } = await import('@simnode/mongo');
+    mongo = new MongoMock(mongoOpts);
+  } catch { /* @simnode/mongo not installed — mongo stays null */ }
 
   const env: SimEnv = {
     seed, clock, random, scheduler,
@@ -215,23 +247,23 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
   };
   env.faults = new FaultInjector(env);
 
-  // Inject loopback URLs so libraries that read process.env at startup
-  // (Prisma, pg, mongoose, ioredis) find the simulation endpoints.
-  process.env.DATABASE_URL = 'postgres://localhost:5432/sim';
-  process.env.PGURL        = 'postgres://localhost:5432/sim';
-  process.env.REDIS_URL    = 'redis://localhost:6379';
-  process.env.MONGODB_URI  = 'mongodb://localhost:27017/sim';
-
-  // Register well-known protocol mocks as in-process TCP routes.
-  tcp.mock('localhost:5432',  { handler: pg.createHandler() });
-  tcp.mock('localhost:6379',  { handler: redis.createHandler() });
-  tcp.mock('localhost:27017', { handler: mongo.createHandler() });
-
-  // Start loopback TCP servers for out-of-process binaries (e.g. Prisma engine).
-  // Errors (e.g. EADDRINUSE) are swallowed — in-process interceptor still works.
-  _tryAddLocalServer(tcp, 5432,  pg.createHandler(),    timeline);
-  _tryAddLocalServer(tcp, 6379,  redis.createHandler(), timeline);
-  _tryAddLocalServer(tcp, 27017, mongo.createHandler(), timeline);
+  // Inject loopback URLs and register TCP routes only for installed mocks.
+  if (pg) {
+    process.env.DATABASE_URL = 'postgres://localhost:5432/sim';
+    process.env.PGURL        = 'postgres://localhost:5432/sim';
+    tcp.mock('localhost:5432', { handler: pg.createHandler() });
+    _tryAddLocalServer(tcp, 5432, pg.createHandler(), timeline);
+  }
+  if (redis) {
+    process.env.REDIS_URL = 'redis://localhost:6379';
+    tcp.mock('localhost:6379', { handler: redis.createHandler() });
+    _tryAddLocalServer(tcp, 6379, redis.createHandler(), timeline);
+  }
+  if (mongo) {
+    process.env.MONGODB_URI = 'mongodb://localhost:27017/sim';
+    tcp.mock('localhost:27017', { handler: mongo.createHandler() });
+    _tryAddLocalServer(tcp, 27017, mongo.createHandler(), timeline);
+  }
 
   return env;
 }
