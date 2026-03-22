@@ -5,9 +5,9 @@ import { Scheduler } from '@simnode/scheduler';
 import { HttpInterceptor } from '@simnode/http-proxy';
 import { TcpInterceptor } from '@simnode/tcp';
 import { VirtualFS } from '@simnode/filesystem';
-import { PgMock } from '@simnode/pg-mock';
-import { RedisMock } from '@simnode/redis-mock';
-import { MongoMock } from '@simnode/mongo';
+import type { PgMock } from '@simnode/pg-mock';
+import type { RedisMock } from '@simnode/redis-mock';
+import type { MongoMock } from '@simnode/mongo';
 import { createRequire } from 'node:module';
 
 const _require = createRequire(import.meta.url);
@@ -187,6 +187,14 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
   const fs = new VirtualFS({ clock });
 
   const timeline = new Timeline();
+
+  // Heavy mock packages — loaded lazily so importing env.ts never triggers
+  // PGlite WASM init, ioredis-mock, or mongodb-memory-server at module-load time.
+  const [{ PgMock }, { RedisMock }, { MongoMock }] = await Promise.all([
+    import('@simnode/pg-mock'),
+    import('@simnode/redis-mock'),
+    import('@simnode/mongo'),
+  ]);
 
   const pg = new PgMock();
   // Ensure PGlite WASM is fully initialised BEFORE determinism patches
