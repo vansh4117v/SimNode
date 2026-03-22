@@ -189,6 +189,9 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
   const timeline = new Timeline();
 
   const pg = new PgMock();
+  // Ensure PGlite WASM is fully initialised BEFORE determinism patches
+  // replace setTimeout — PGlite's init may use real timers internally.
+  await pg.ready();
   const redis = new RedisMock();
   const mongo = new MongoMock(mongoOpts);
 

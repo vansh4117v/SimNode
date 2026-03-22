@@ -42,6 +42,11 @@ class PgConnection {
   private _txState: 'I' | 'T' | 'E' = 'I';
   private _buf: Buffer = Buffer.alloc(0);
 
+  /** Prepared statements: statement name → SQL. '' = unnamed statement. */
+  private _statements = new Map<string, string>();
+  /** Bound portals: portal name → { sql, params }. '' = unnamed portal. */
+  private _portals = new Map<string, { sql: string; params: string[] }>();
+
   constructor(private _pglite: Promise<PGliteInstance>) {}
 
   async processData(data: Buffer): Promise<Buffer> {
@@ -84,11 +89,20 @@ class PgConnection {
       }
 
       switch (msgType) {
-        case 'P': { // Parse
+        case 'P': { // Parse: statement_name\0 + query\0 + Int16(numParams) + ...
+          const nameEnd = payload.indexOf(0);
+          const stmtName = nameEnd > 0 ? payload.toString('utf8', 0, nameEnd) : '';
+          const queryStart = nameEnd + 1;
+          const queryEnd = payload.indexOf(0, queryStart);
+          const sql = payload.toString('utf8', queryStart, queryEnd >= 0 ? queryEnd : payload.length);
+          this._statements.set(stmtName, sql);
           responses.push(proto.parseComplete());
           break;
         }
-        case 'B': { // Bind
+        case 'B': { // Bind: portal\0 + statement\0 + formats + params + result_formats
+          const { portal, statement, params } = this._parseBind(payload);
+          const boundSql = this._statements.get(statement) ?? '';
+          this._portals.set(portal, { sql: boundSql, params });
           responses.push(proto.bindComplete());
           break;
         }
@@ -96,16 +110,21 @@ class PgConnection {
           responses.push(proto.noData());
           break;
         }
-        case 'E': { // Execute
-          const sql = proto.parseExecuteMsg(payload);
-          if (sql) {
-            const r = await this._execQuery(sql);
+        case 'E': { // Execute: portal\0 + maxRows(Int32)
+          const portalEnd = payload.indexOf(0);
+          const portalName = portalEnd > 0 ? payload.toString('utf8', 0, portalEnd) : '';
+          const bound = this._portals.get(portalName);
+          if (bound && bound.sql) {
+            const r = await this._execQueryWithParams(bound.sql, bound.params);
             responses.push(r);
           }
           break;
         }
         case 'S': { // Sync
           responses.push(proto.readyForQuery(this._txState));
+          break;
+        }
+        case 'X': { // Terminate
           break;
         }
         default:
@@ -115,6 +134,70 @@ class PgConnection {
     }
 
     return responses.length > 0 ? Buffer.concat(responses) : Buffer.alloc(0);
+  }
+
+  /** Parse a Bind message payload into portal, statement, and parameter values. */
+  private _parseBind(payload: Buffer): { portal: string; statement: string; params: string[] } {
+    let off = 0;
+    // portal name \0
+    const portalEnd = payload.indexOf(0, off);
+    const portal = portalEnd > off ? payload.toString('utf8', off, portalEnd) : '';
+    off = portalEnd + 1;
+    // statement name \0
+    const stmtEnd = payload.indexOf(0, off);
+    const statement = stmtEnd > off ? payload.toString('utf8', off, stmtEnd) : '';
+    off = stmtEnd + 1;
+    // Int16 num format codes + format codes (skip)
+    const numFormats = payload.readInt16BE(off); off += 2;
+    off += numFormats * 2; // skip format codes
+    // Int16 num params
+    const numParams = payload.readInt16BE(off); off += 2;
+    const params: string[] = [];
+    for (let i = 0; i < numParams; i++) {
+      const len = payload.readInt32BE(off); off += 4;
+      if (len === -1) {
+        params.push('NULL');
+      } else {
+        params.push(payload.toString('utf8', off, off + len));
+        off += len;
+      }
+    }
+    return { portal, statement, params };
+  }
+
+  /** Execute a parameterized query — substitutes $1, $2, … and runs via PGlite. */
+  private async _execQueryWithParams(sql: string, params: string[]): Promise<Buffer> {
+    const trimmed = sql.trim();
+    const upper = trimmed.toUpperCase();
+
+    if (upper === 'BEGIN')    { this._txState = 'T'; return proto.commandComplete('BEGIN'); }
+    if (upper === 'COMMIT')   { this._txState = 'I'; return proto.commandComplete('COMMIT'); }
+    if (upper === 'ROLLBACK') { this._txState = 'I'; return proto.commandComplete('ROLLBACK'); }
+
+    const db = await this._pglite;
+    try {
+      // PGlite supports parameterized queries directly
+      const result = await db.query(trimmed, params);
+      const fields: Array<{ name: string }> = result.fields ?? [];
+      const rows:   Array<Record<string, unknown>> = result.rows ?? [];
+
+      const bufs: Buffer[] = [];
+      if (fields.length > 0) {
+        bufs.push(proto.rowDescription(fields.map((f: { name: string }) => f.name)));
+        for (const row of rows) {
+          bufs.push(proto.dataRow(fields.map((f: { name: string }) => {
+            const v = row[f.name];
+            return v === null || v === undefined ? null : String(v);
+          })));
+        }
+      }
+
+      const tag = inferTag(trimmed, rows.length, result.affectedRows as number | undefined);
+      bufs.push(proto.commandComplete(tag));
+      return Buffer.concat(bufs);
+    } catch (err) {
+      return proto.errorResponse(err instanceof Error ? err.message : String(err));
+    }
   }
 
   private async _execQuery(sql: string): Promise<Buffer> {

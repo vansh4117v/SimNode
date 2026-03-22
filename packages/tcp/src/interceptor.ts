@@ -272,6 +272,14 @@ export class TcpInterceptor {
 
     // Patch Socket.prototype.connect so `new net.Socket().connect()`
     // also goes through the interceptor.
+    //
+    // Libraries like `pg` do `const s = new net.Socket(); s.connect(...)`.
+    // They keep a reference to `s` (the real Socket) and write/read on it.
+    // We cannot simply return a VirtualSocket — the caller ignores the
+    // return value.  Instead we turn the REAL socket into a proxy:
+    //  - Override _write so writes go to VirtualSocket's mock handler.
+    //  - Pipe VirtualSocket responses back via the real socket's push().
+    //  - Forward lifecycle events (connect, close, error, end).
     netCjs.Socket.prototype.connect = function (
       this: net.Socket,
       ...args: unknown[]
@@ -283,14 +291,84 @@ export class TcpInterceptor {
         return self._origSocketConnect!.apply(this, args as any);
       }
       const vs = self._intercept(host, port);
-      // Copy event listeners from the real Socket to the VirtualSocket
-      // (in case the consumer attached listeners before calling .connect())
-      for (const event of ['data', 'error', 'close', 'connect', 'end'] as const) {
-        for (const listener of this.listeners(event)) {
-          vs.on(event, listener as (...a: unknown[]) => void);
+      // The caller (e.g. pg) holds a reference to `this` (the real
+      // net.Socket) and will read/write on it.  We turn it into a thin
+      // proxy that delegates everything to the VirtualSocket `vs`.
+      const realSocket = this;
+      const rs = realSocket as any;
+
+      // Override the internal Duplex _write so data goes to VirtualSocket.
+      rs._write = (
+        chunk: Buffer | string,
+        encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+      ): void => {
+        vs._write(chunk as any, encoding, callback);
+      };
+
+      // Override _writev for batched/corked writes (pg corks the stream for
+      // extended query protocol messages, then uncorks → Node calls _writev).
+      rs._writev = (
+        chunks: Array<{ chunk: Buffer | string; encoding: BufferEncoding }>,
+        callback: (error?: Error | null) => void,
+      ): void => {
+        const combined = Buffer.concat(
+          chunks.map(c => Buffer.isBuffer(c.chunk) ? c.chunk : Buffer.from(c.chunk, c.encoding)),
+        );
+        vs._write(combined as any, 'buffer' as BufferEncoding, callback);
+      };
+
+      // Override _read (pull-based reads) — data arrives via push(), no-op.
+      rs._read = (): void => {};
+
+      // Override end() to bypass the normal shutdown path that requires
+      // a real TCP handle + ShutdownWrap.
+      rs.end = (...args: unknown[]): net.Socket => {
+        // Extract optional callback from end(data?, enc?, cb?) signature
+        const cb = typeof args[args.length - 1] === 'function' ? args.pop() as () => void : undefined;
+        // If there's final data, write it first
+        const data = args[0];
+        if (data != null) realSocket.write(data as any, args[1] as any);
+        // Signal writable end
+        const ws = (realSocket as any)._writableState;
+        if (ws && !ws.ended) ws.ended = true;
+        vs.end();
+        if (cb) queueMicrotask(cb);
+        return realSocket;
+      };
+
+      // Override destroy to clean up both sockets without touching handles.
+      rs.destroy = (err?: Error): net.Socket => {
+        if (rs.destroyed) return realSocket;
+        rs.destroyed = true;
+        rs.connecting = false;
+        if (err) vs.destroy(err); else vs.destroy();
+        realSocket.emit('close', !!err);
+        return realSocket;
+      };
+
+      // Pipe responses: VirtualSocket data → real socket readable side.
+      vs.on('data', (data: Buffer) => {
+        if (!rs.destroyed) realSocket.push(data);
+      });
+
+      // Forward lifecycle events from VirtualSocket → real socket.
+      vs.on('connect', () => {
+        rs.connecting = false;
+        realSocket.emit('connect');
+        realSocket.emit('ready');
+      });
+      vs.on('error', (err: Error) => {
+        if (!rs.destroyed) realSocket.emit('error', err);
+      });
+      vs.on('end', () => {
+        if (!rs.destroyed) {
+          realSocket.push(null);
+          realSocket.emit('end');
         }
-      }
-      return vs as unknown as net.Socket;
+      });
+
+      return this;
     } as typeof net.Socket.prototype.connect;
   }
 

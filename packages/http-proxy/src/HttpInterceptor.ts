@@ -251,8 +251,9 @@ export class HttpInterceptor {
       function fakeRequest(this: unknown, ...args: unknown[]): FakeClientRequest | http.ClientRequest {
         const { url, method, headers, callback } = normalizeArgs(proto, args);
         // Passthrough: unmatched localhost requests (supertest, local test
-        // servers) go through the real http stack instead of emitting an error.
-        if (!self._partitioned && !self._routes.find(r => r.matches(url)) && _isLocalUrl(url)) {
+        // servers) ALWAYS go through the real http stack — even during a
+        // network partition.  blockAll() only affects external / mocked URLs.
+        if (_isLocalUrl(url) && !self._routes.find(r => r.matches(url))) {
           return origReq.apply(null, args as any);
         }
         return self._intercept(url, method, headers, callback);
