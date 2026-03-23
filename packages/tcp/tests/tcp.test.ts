@@ -211,6 +211,27 @@ describe('scheduler integration', () => {
     sock.destroy();
   });
 
+  it('zero-latency responses auto-drain through scheduler without explicit runTick', async () => {
+    const clock = new VirtualClock(0);
+    const scheduler = new Scheduler({ prngSeed: 7 });
+
+    interceptor = new TcpInterceptor({ clock, scheduler });
+    interceptor.mock('localhost:5432', {
+      handler: () => Buffer.from('ready'),
+      latency: 0,
+    });
+    interceptor.install();
+
+    const sock = await connect(5432);
+    let responseData = '';
+    sock.on('data', (c: Buffer) => { responseData += c.toString(); });
+    sock.write('query');
+
+    await new Promise(r => setTimeout(r, 10));
+    expect(responseData).toBe('ready');
+    sock.destroy();
+  });
+
   it('deterministic ordering of two sockets at same virtual time', async () => {
     async function runScenario(seed: number): Promise<string[]> {
       const clock = new VirtualClock(0);

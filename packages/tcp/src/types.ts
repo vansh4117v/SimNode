@@ -12,6 +12,7 @@ export interface IClock {
 /** Minimal scheduler interface. */
 export interface IScheduler {
   enqueueCompletion(op: { id: string; when: number; run: () => Promise<void> | void }): void;
+  requestRunTick?(virtualTime: number): void;
 }
 
 /** A registered TCP mock handler. */

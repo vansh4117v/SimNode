@@ -24,6 +24,9 @@ export class Scheduler {
   private _clock: IClock | undefined;
   private readonly _rng: () => number;
   private readonly _pending: PendingOp[] = [];
+  private _runChain: Promise<void> = Promise.resolve();
+  private _autoDrainScheduled = false;
+  private _requestedTick: number | null = null;
 
   constructor(opts: SchedulerOptions = {}) {
     this._clock = opts.clock;
@@ -43,6 +46,35 @@ export class Scheduler {
   }
 
   /**
+   * Request an asynchronous drain for ops ready at `virtualTime`.
+   *
+   * Multiple calls in the same turn are coalesced into one microtask and the
+   * highest requested virtual time is used.
+   */
+  requestRunTick(virtualTime: number): void {
+    this._requestedTick = this._requestedTick == null
+      ? virtualTime
+      : Math.max(this._requestedTick, virtualTime);
+
+    if (this._autoDrainScheduled) return;
+    this._autoDrainScheduled = true;
+
+    queueMicrotask(() => {
+      this._autoDrainScheduled = false;
+      const tick = this._requestedTick;
+      this._requestedTick = null;
+      if (tick == null) return;
+      void this.runTick(tick).catch(() => {
+        // Errors still surface to explicit runTick callers; requestRunTick is
+        // best-effort and must not throw asynchronously.
+      });
+      if (this._requestedTick != null) {
+        this.requestRunTick(this._requestedTick);
+      }
+    });
+  }
+
+  /**
    * Attach (or replace) the clock reference.
    *
    * Integration contract: when the clock advances to time `t`, it should
@@ -59,50 +91,56 @@ export class Scheduler {
    * microtask checkpoint (`await Promise.resolve()`) between each.
    */
   async runTick(virtualTime: number): Promise<void> {
-    // Loop to handle cascading completions: ops enqueued during callback
-    // execution that are also ready at this virtual time are picked up
-    // in the next iteration, preserving causal ordering.
-    while (true) {
-      // 1. Partition: pull out all ops ready at this tick.
-      const ready: PendingOp[] = [];
-      const remaining: PendingOp[] = [];
-      for (const op of this._pending) {
-        if (op.when <= virtualTime) {
-          ready.push(op);
-        } else {
-          remaining.push(op);
-        }
-      }
-      this._pending.length = 0;
-      this._pending.push(...remaining);
-
-      if (ready.length === 0) break;
-
-      // 2. Stable-sort by `when` ascending so earlier ops run first,
-      //    then shuffle within each same-`when` group via PRNG.
-      ready.sort((a, b) => a.when - b.when);
-
-      // Group by `when` and shuffle each group.
-      let i = 0;
-      while (i < ready.length) {
-        let j = i;
-        while (j < ready.length && ready[j].when === ready[i].when) j++;
-        if (j - i > 1) {
-          const group = ready.slice(i, j);
-          shuffleInPlace(group, this._rng);
-          for (let k = 0; k < group.length; k++) {
-            ready[i + k] = group[k];
+    const run = async (): Promise<void> => {
+      // Loop to handle cascading completions: ops enqueued during callback
+      // execution that are also ready at this virtual time are picked up
+      // in the next iteration, preserving causal ordering.
+      while (true) {
+        // 1. Partition: pull out all ops ready at this tick.
+        const ready: PendingOp[] = [];
+        const remaining: PendingOp[] = [];
+        for (const op of this._pending) {
+          if (op.when <= virtualTime) {
+            ready.push(op);
+          } else {
+            remaining.push(op);
           }
         }
-        i = j;
-      }
+        this._pending.length = 0;
+        this._pending.push(...remaining);
 
-      // 3. Execute sequentially, with a microtask boundary between each.
-      for (const op of ready) {
-        await op.run();
-        await Promise.resolve(); // microtask checkpoint
+        if (ready.length === 0) break;
+
+        // 2. Stable-sort by `when` ascending so earlier ops run first,
+        //    then shuffle within each same-`when` group via PRNG.
+        ready.sort((a, b) => a.when - b.when);
+
+        // Group by `when` and shuffle each group.
+        let i = 0;
+        while (i < ready.length) {
+          let j = i;
+          while (j < ready.length && ready[j].when === ready[i].when) j++;
+          if (j - i > 1) {
+            const group = ready.slice(i, j);
+            shuffleInPlace(group, this._rng);
+            for (let k = 0; k < group.length; k++) {
+              ready[i + k] = group[k];
+            }
+          }
+          i = j;
+        }
+
+        // 3. Execute sequentially, with a microtask boundary between each.
+        for (const op of ready) {
+          await op.run();
+          await Promise.resolve(); // microtask checkpoint
+        }
       }
-    }
+    };
+
+    const chained = this._runChain.then(run);
+    this._runChain = chained.catch(() => {});
+    return chained;
   }
 
   /**

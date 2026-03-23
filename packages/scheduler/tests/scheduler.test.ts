@@ -203,3 +203,33 @@ describe('microtask flushing', () => {
     expect(order).toEqual(['A', 'A-microtask', 'B']);
   });
 });
+
+// 7. requestRunTick() auto-drain
+
+describe('requestRunTick', () => {
+  it('drains ready ops without explicit runTick call', async () => {
+    const sched = new Scheduler({ prngSeed: 1 });
+    const order: string[] = [];
+
+    sched.enqueueCompletion({ id: 'a', when: 0, run: () => { order.push('a'); } });
+    sched.requestRunTick(0);
+
+    await new Promise<void>(r => setTimeout(r, 0));
+    expect(order).toEqual(['a']);
+  });
+
+  it('coalesces same-turn requests and drains all ready ops once', async () => {
+    const sched = new Scheduler({ prngSeed: 1 });
+    const order: string[] = [];
+
+    sched.enqueueCompletion({ id: 'a', when: 0, run: () => { order.push('a'); } });
+    sched.enqueueCompletion({ id: 'b', when: 0, run: () => { order.push('b'); } });
+    sched.requestRunTick(0);
+    sched.requestRunTick(0);
+
+    await new Promise<void>(r => setTimeout(r, 0));
+    expect(order).toHaveLength(2);
+    expect(new Set(order)).toEqual(new Set(['a', 'b']));
+    expect(sched.pendingCount).toBe(0);
+  });
+});

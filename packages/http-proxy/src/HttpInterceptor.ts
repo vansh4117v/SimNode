@@ -14,6 +14,7 @@ export interface IClock {
 /** Minimal scheduler interface (duck-typed). */
 export interface IScheduler {
   enqueueCompletion(op: { id: string; when: number; run: () => Promise<void> | void }): void;
+  requestRunTick?(virtualTime: number): void;
 }
 
 export interface MockResponseConfig {
@@ -345,13 +346,17 @@ export class HttpInterceptor {
       // Spec v3: Always route through scheduler when available — even zero-latency
       // responses — so PRNG ordering applies to all same-tick HTTP completions.
       if (this._scheduler && this._clock) {
-        const when = this._clock.now() + latency;
+        const now = this._clock.now();
+        const when = now + latency;
         const opId = `http-${++_httpReqCounter}`;
         this._scheduler.enqueueCompletion({
           id: opId,
           when,
           run: () => { deliver(); return Promise.resolve(); },
         });
+        if (latency <= 0) {
+          this._scheduler.requestRunTick?.(now);
+        }
       } else if (latency > 0 && this._clock) {
         this._clock.setTimeout(deliver, latency);
       } else {

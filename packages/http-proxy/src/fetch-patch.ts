@@ -107,13 +107,17 @@ export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: ty
        // Spec v3: Always route through scheduler when available — even zero-latency
        // responses — so PRNG ordering applies to all same-tick completions.
        if (anyInterceptor._scheduler && anyInterceptor._clock) {
-         const when = anyInterceptor._clock.now() + latency;
+         const now = anyInterceptor._clock.now();
+         const when = now + latency;
          const opId = `fetch-${++_fetchReqCounter}`;
          (anyInterceptor._scheduler as IScheduler).enqueueCompletion({
            id: opId,
            when,
            run: () => { deliver(); return Promise.resolve(); },
          });
+         if (latency <= 0) {
+           (anyInterceptor._scheduler as IScheduler).requestRunTick?.(now);
+         }
        } else if (latency > 0 && anyInterceptor._clock) {
          anyInterceptor._clock.setTimeout(deliver, latency);
        } else {
