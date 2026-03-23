@@ -109,10 +109,11 @@ export class VirtualSocket extends Duplex {
       // Clock-only path (no scheduler), nonzero latency.
       this._clock.setTimeout(() => { void deliver(); }, latency);
     } else {
-      throw new Error(
+      callback(new Error(
         '[SimNode] VirtualSocket: a Scheduler is required for deterministic I/O delivery. ' +
         'Pass { scheduler } when constructing TcpInterceptor.',
-      );
+      ));
+      return;
     }
 
     callback();
