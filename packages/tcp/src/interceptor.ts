@@ -85,6 +85,7 @@ export class TcpInterceptor {
   /** Remove all registered mocks and recorded sockets. */
   reset(): void {
     this._mocks.clear();
+    this._everMockedKeys.clear();
     this._sockets.length = 0;
     this._partitioned = false;
     this._extraLatency = 0;

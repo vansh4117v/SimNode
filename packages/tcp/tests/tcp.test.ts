@@ -351,6 +351,9 @@ describe('socket tracking', () => {
     interceptor.reset();
 
     expect(interceptor.sockets).toHaveLength(0);
-    expect(() => net.createConnection(5432)).toThrow(SimNodeUnmockedTCPConnectionError);
+    // After a full reset, previously-mocked ports are no longer intercepted;
+    // connections pass through to the real network without a synchronous throw.
+    const sock = net.createConnection(5432);
+    sock.destroy();
   });
 });

@@ -76,8 +76,7 @@ async function main(): Promise<void> {
       console.log('  Timeline:');
       console.log(f.timeline.split('\n').map((l: string) => '    ' + l).join('\n'));
     }
-    const total = result.passes + result.failures.length;
-    console.log(`\n${result.passes}/${total} passed${result.failures.length > 0 ? `, ${result.failures.length} failed` : ''}`);
+    console.log(`\n${result.passes}/${result.seedsRun} passed${result.failures.length > 0 ? `, ${result.failures.length} failed` : ''}`);
     process.exit(result.passed ? 0 : 1);
   }
 

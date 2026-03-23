@@ -71,8 +71,10 @@ export interface ScenarioResult {
 
 export interface SimResult {
   passed: boolean;
-  /** Number of seeds that passed. */
+  /** Number of seeds that passed (all scenarios passed for that seed). */
   passes: number;
+  /** Total number of seeds that were attempted. */
+  seedsRun: number;
   /** Only failing results — passing results are counted but not stored. */
   failures: ScenarioResult[];
 }
@@ -126,6 +128,7 @@ export class Simulation {
     const stopOnFirst = opts?.stopOnFirstFailure ?? true;
     const failures: ScenarioResult[] = [];
     let passes = 0;
+    let seedsRun = 0;
     const mongo = await _startMongo();
     try {
       outer: for (let s = 0; s < seedCount; s++) {
@@ -136,15 +139,16 @@ export class Simulation {
           if (!r.passed) {
             seedPassed = false;
             failures.push(r);
-            if (stopOnFirst) break outer;
+            if (stopOnFirst) { seedsRun++; break outer; }
           }
         }
+        seedsRun++;
         if (seedPassed) passes++;
       }
     } finally {
       await _stopMongo(mongo);
     }
-    return { passed: failures.length === 0, passes, failures };
+    return { passed: failures.length === 0, passes, seedsRun, failures };
   }
 
   async replay(opts: { seed: number; scenario: string }): Promise<ReplayResult> {
