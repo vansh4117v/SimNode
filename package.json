@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "tsc --build --clean && npm run build:pkg --workspaces && tsc --build",
-    "build:pkg": ":",
+    "build:pkg": "bun run --filter './packages/*' --sequential build:pkg",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --build",
