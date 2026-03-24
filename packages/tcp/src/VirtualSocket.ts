@@ -3,6 +3,15 @@ import type { TcpMockHandler, TcpMockConfig, IClock, IScheduler, TcpHandlerResul
 
 let nextSocketId = 0;
 
+/** Fast non-cryptographic hash of a buffer used to make op IDs unique. */
+function bufHash(buf: Buffer): number {
+  let h = 5381;
+  for (let i = 0; i < buf.length; i++) {
+    h = ((h << 5) + h + buf[i]) >>> 0;
+  }
+  return h;
+}
+
 /**
  * In-memory duplex stream that replaces a real `net.Socket`.
  *
@@ -98,7 +107,7 @@ export class VirtualSocket extends Duplex {
       const now = this._clock?.now() ?? 0;
       const when = now + Math.max(0, latency);
       this._scheduler.enqueueCompletion({
-        id: `tcp-${this.id}-${now}`,
+        id: `tcp-${this.id}-${now}-${bufHash(buf)}`,
         when,
         run: deliver,
       });

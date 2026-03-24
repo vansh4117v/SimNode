@@ -122,6 +122,12 @@ export class Scheduler {
           while (j < ready.length && ready[j].when === ready[i].when) j++;
           if (j - i > 1) {
             const group = ready.slice(i, j);
+            // Sort by id first so the shuffle always starts from the same
+            // canonical order regardless of real-event-loop enqueue order.
+            // Without this, two ops enqueued as [A,B] vs [B,A] (due to
+            // non-deterministic real timing) would produce different shuffle
+            // outcomes for the same seed, breaking replay determinism.
+            group.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
             shuffleInPlace(group, this._rng);
             for (let k = 0; k < group.length; k++) {
               ready[i + k] = group[k];

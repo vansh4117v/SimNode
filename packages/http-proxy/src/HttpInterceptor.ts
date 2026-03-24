@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { URL } from 'node:url';
+import { reqHash } from './req-hash.js';
 
 // Types
 
@@ -169,7 +170,6 @@ const _require = createRequire(import.meta.url);
 const httpCjs = _require('node:http') as typeof http;
 const httpsCjs = _require('node:https') as typeof https;
 
-let _httpReqCounter = 0;
 
 export class HttpInterceptor {
   private readonly _routes: MockRoute[] = [];
@@ -348,7 +348,7 @@ export class HttpInterceptor {
       if (this._scheduler) {
         const now = this._clock?.now() ?? 0;
         const when = now + latency;
-        const opId = `http-${++_httpReqCounter}`;
+        const opId = `http-${now}-${reqHash(method + '|' + url + '|' + (fakeReq.body ?? ''))}`;
         this._scheduler.enqueueCompletion({
           id: opId,
           when,

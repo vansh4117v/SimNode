@@ -155,6 +155,52 @@ describe('no real network', () => {
   });
 });
 
+// Replay determinism: enqueue order must NOT affect execution order
+//
+// Sequential counter IDs (http-1, http-2, …) caused Fisher-Yates to produce
+// different orders depending on which request arrived first in real time.
+// Content-derived IDs (hash of method+url+body) fix this.
+
+describe('replay determinism', () => {
+  it('same seed produces same execution order regardless of request arrival order', async () => {
+    async function runWithOrder(seed: number, urlOrder: string[]): Promise<string[]> {
+      const clock = new VirtualClock(0);
+      const sched = new Scheduler({ prngSeed: seed });
+      clock.onTick = (t) => sched.runTick(t);
+      const localInterceptor = new HttpInterceptor({ clock, scheduler: sched });
+      const completionOrder: string[] = [];
+
+      localInterceptor.mock('http://svc.test.com/', {
+        match: 'prefix',
+        latency: 100,
+        handler: (call) => ({ status: 200, body: call.url.split('/').pop()! }),
+      });
+      localInterceptor.install();
+
+      const promises = urlOrder.map(url =>
+        request(url).then(res => { completionOrder.push(res.body); return res; }),
+      );
+      await clock.advance(100);
+      await Promise.all(promises);
+      localInterceptor.uninstall();
+      return completionOrder;
+    }
+
+    const urls = [
+      'http://svc.test.com/alpha',
+      'http://svc.test.com/beta',
+      'http://svc.test.com/gamma',
+    ];
+    const reversed = [...urls].reverse();
+
+    for (let seed = 0; seed < 10; seed++) {
+      const fwd = await runWithOrder(seed, urls);
+      const rev = await runWithOrder(seed, reversed);
+      expect(rev).toEqual(fwd);
+    }
+  });
+});
+
 // Reset
 
 describe('reset', () => {

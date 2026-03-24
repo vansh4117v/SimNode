@@ -141,6 +141,58 @@ describe('seed exploration', () => {
   });
 });
 
+// Replay determinism: enqueue order must NOT affect shuffle outcome
+//
+// Root cause of the original bug: Fisher-Yates shuffle on [A,B] vs [B,A]
+// with the same seed produced different results because the initial array
+// order fed into the shuffle differed.  The fix (sort by id before shuffle)
+// means the shuffle always starts from a canonical order.
+
+describe('replay determinism', () => {
+  it('same seed produces same order regardless of enqueue order', async () => {
+    const ids = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
+
+    async function runWithEnqueueOrder(seed: number, order: string[]): Promise<string[]> {
+      const sched = new Scheduler({ prngSeed: seed });
+      const result: string[] = [];
+      for (const id of order) {
+        sched.enqueueCompletion({ id, when: 100, run: () => { result.push(id); } });
+      }
+      await sched.runTick(100);
+      return result;
+    }
+
+    const reversed = [...ids].reverse();
+    const shuffled = [ids[2], ids[0], ids[4], ids[1], ids[3]];
+
+    for (let seed = 0; seed < 10; seed++) {
+      const forward  = await runWithEnqueueOrder(seed, ids);
+      const backward = await runWithEnqueueOrder(seed, reversed);
+      const mixed    = await runWithEnqueueOrder(seed, shuffled);
+
+      expect(backward).toEqual(forward);
+      expect(mixed).toEqual(forward);
+    }
+  });
+
+  it('enqueue order independence holds with 2-op groups (the minimal race)', async () => {
+    async function run(seed: number, first: string, second: string): Promise<string[]> {
+      const sched = new Scheduler({ prngSeed: seed });
+      const result: string[] = [];
+      sched.enqueueCompletion({ id: first,  when: 50, run: () => { result.push(first);  } });
+      sched.enqueueCompletion({ id: second, when: 50, run: () => { result.push(second); } });
+      await sched.runTick(50);
+      return result;
+    }
+
+    for (let seed = 0; seed < 20; seed++) {
+      const ab = await run(seed, 'req-A', 'req-B');
+      const ba = await run(seed, 'req-B', 'req-A');
+      expect(ba).toEqual(ab);
+    }
+  });
+});
+
 // runTick with no pending ops
 
 describe('edge cases', () => {

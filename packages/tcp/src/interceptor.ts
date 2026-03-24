@@ -183,7 +183,8 @@ export class TcpInterceptor {
         if (scheduler) {
           const now = clock?.now() ?? 0;
           const when = now + Math.max(0, effectiveLatency);
-          scheduler.enqueueCompletion({ id: `local-${port}-${now}`, when, run: deliver });
+          const dataHash = (() => { let h = 5381; for (let i = 0; i < data.length; i++) h = ((h << 5) + h + data[i]) >>> 0; return h; })();
+          scheduler.enqueueCompletion({ id: `local-${port}-${now}-${dataHash}`, when, run: deliver });
           if (effectiveLatency <= 0) {
             scheduler.requestRunTick?.(now);
           }

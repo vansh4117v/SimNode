@@ -1,7 +1,7 @@
 import type { HttpInterceptor, IScheduler, RecordedCall } from './HttpInterceptor.js';
 import { Buffer } from 'node:buffer';
 
-let _fetchReqCounter = 0;
+import { reqHash } from './req-hash.js';
 
 export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: typeof globalThis.fetch) {
   return async function fakeFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -109,7 +109,7 @@ export function createFetchPatch(interceptor: HttpInterceptor, originalFetch: ty
        if (anyInterceptor._scheduler) {
          const now = anyInterceptor._clock?.now() ?? 0;
          const when = now + latency;
-         const opId = `fetch-${++_fetchReqCounter}`;
+         const opId = `fetch-${now}-${reqHash(method + '|' + url + '|' + (body ?? ''))}`;
          (anyInterceptor._scheduler as IScheduler).enqueueCompletion({
            id: opId,
            when,
