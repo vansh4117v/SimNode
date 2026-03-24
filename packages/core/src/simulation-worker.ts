@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import * as vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { createFetchPatch } from '@crashlab/http-proxy';
-import { createEnv, installDeterminismPatches } from './env.js';
+import { createEnv, installEarlyPrngPatches, installDeterminismPatches } from './env.js';
 import type { SimEnv } from './env.js';
 
 // A require() scoped to this worker — injected into the vm sandbox.
@@ -76,6 +76,11 @@ async function main(): Promise<void> {
     await env.scheduler.runTick(t);
   };
 
+  // ── Patch PRNG globals BEFORE loading the scenario module so that
+  // module-level initialisers (BSON's PROCESS_UNIQUE, ObjectId.index,
+  // MongoDB driver session UUIDs, etc.) are deterministic.
+  const earlyPrng = installEarlyPrngPatches(seed);
+
   // ── Load the scenario module BEFORE installing interceptors so that
   // import() (and all transitive require/fs reads) hit the real filesystem.
   // Pre-apply process.env assignments from the scenario source first so that
@@ -116,7 +121,7 @@ async function main(): Promise<void> {
   if (origFetch) globalThis.fetch = createFetchPatch(env.http, origFetch) as typeof globalThis.fetch;
 
   // Apply determinism patches to THIS thread's globals
-  const patches = installDeterminismPatches(env);
+  const patches = installDeterminismPatches(env, earlyPrng);
 
   // Replace the placeholder pump with one that uses the real (unpatched)
   // setTimeout to yield to the host event loop between clock steps.
@@ -124,17 +129,30 @@ async function main(): Promise<void> {
   // scheduler drains pending mock completions at each step.
   env.pump = async (ms: number, steps = 20): Promise<void> => {
     const step = ms / steps;
-    // Warm-up: yield to the real event loop repeatedly WITHOUT advancing
-    // the clock.  This lets in-flight HTTP requests be received, parsed,
-    // and routed by Express — their DB queries land in the scheduler
-    // BEFORE the first clock advance drains anything.
-    for (let i = 0; i < 10; i++) {
+
+    // Adaptive warm-up: yield to the real event loop until every in-flight
+    // HTTP request has been received, parsed by Express, and had its DB
+    // query enqueued in the scheduler — all at virtual-time 0.
+    //
+    // Guards:
+    //   MIN_YIELDS (30 ms)  — minimum real-time warm-up for TCP loopback.
+    //   pendingCount > 0    — don't exit while scheduler is still empty.
+    //   SETTLE (20 ms quiet)— catch the second request arriving after the first.
+    //   MAX (200 ms)        — hard cap to avoid infinite warm-up.
+    const MIN_YIELDS = 15;
+    const SETTLE     = 10;
+    const MAX        = 100;
+    let stable = 0;
+    let last   = env.scheduler.pendingCount;
+    for (let i = 0; i < MAX; i++) {
       await new Promise<void>(r => patches.realSetTimeout(r, 2));
+      const cur = env.scheduler.pendingCount;
+      if (cur !== last) { stable = 0; last = cur; } else { stable++; }
+      if (i >= MIN_YIELDS && last > 0 && stable >= SETTLE) break;
     }
+
     for (let i = 0; i < steps; i++) {
-      // Yield to the real event loop so HTTP I/O events are processed
       await new Promise<void>(r => patches.realSetTimeout(r, 1));
-      // Advance the virtual clock one step — onTick drains the scheduler
       await env.clock.advance(step);
     }
   };

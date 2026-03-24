@@ -1,6 +1,6 @@
 {
   "name": "@crashlab/core",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.cjs",
@@ -30,12 +30,12 @@
     "build:pkg": "tsup && tsc --build tsconfig.json --force"
   },
   "dependencies": {
-    "@crashlab/clock": "0.1.0",
-    "@crashlab/filesystem": "0.1.0",
-    "@crashlab/http-proxy": "0.1.0",
-    "@crashlab/random": "0.1.0",
-    "@crashlab/scheduler": "0.1.0",
-    "@crashlab/tcp": "0.1.0"
+    "@crashlab/clock": "0.1.6",
+    "@crashlab/filesystem": "0.1.6",
+    "@crashlab/http-proxy": "0.1.6",
+    "@crashlab/random": "0.1.6",
+    "@crashlab/scheduler": "0.1.6",
+    "@crashlab/tcp": "0.1.6"
   },
   "peerDependencies": {
     "@crashlab/mongo": ">=0.1.0",

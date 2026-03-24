@@ -270,6 +270,102 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
   return env;
 }
 
+// ── PRNG patches (early + full) ──────────────────────────────────────────────
+
+/**
+ * Handle returned by installEarlyPrngPatches.
+ *
+ * `originals` holds the **real** (pre-patch) functions so that
+ * installDeterminismPatches can restore them on teardown — even though
+ * Math.random / crypto have already been overwritten by the early patch.
+ */
+export interface EarlyPrngPatchHandle {
+  origMathRandom: typeof Math.random;
+  origRandomBytes: typeof import('node:crypto').randomBytes;
+  origRandomUUID: typeof import('node:crypto').randomUUID;
+  origGlobalRandomUUID?: typeof crypto.randomUUID;
+  origGlobalGetRandomValues?: typeof crypto.getRandomValues;
+}
+
+/**
+ * Patch **only** the PRNG globals (Math.random, crypto.randomBytes,
+ * crypto.randomUUID, crypto.getRandomValues) so that module-level
+ * initialisers in third-party libraries (e.g. BSON's `PROCESS_UNIQUE`,
+ * `ObjectId.index`) produce deterministic values.
+ *
+ * **Must be called BEFORE `import(scenarioPath)`** — that import triggers
+ * all transitive module initialisers, many of which call Math.random or
+ * crypto.randomBytes at load time.
+ *
+ * Returns a handle containing the captured real originals.  Pass this
+ * handle to `installDeterminismPatches` so it can restore them on teardown.
+ */
+export function installEarlyPrngPatches(seed: number): EarlyPrngPatchHandle {
+  // Capture the REAL originals before any patching.
+  const origMathRandom = Math.random;
+  const origRandomBytes = cryptoCjs.randomBytes;
+  const origRandomUUID  = cryptoCjs.randomUUID;
+
+  const globalCrypto = globalThis.crypto;
+  const origGlobalRandomUUID = globalCrypto?.randomUUID
+    ? globalCrypto.randomUUID.bind(globalCrypto) : undefined;
+  const origGlobalGetRandomValues = globalCrypto?.getRandomValues
+    ? globalCrypto.getRandomValues.bind(globalCrypto) : undefined;
+
+  // Independent sub-stream for Math.random (XOR'd seed avoids correlation).
+  const mathRng = mulberry32(seed ^ 0x6D617468);
+  Math.random = () => mathRng();
+
+  // Crypto PRNG stream.
+  const rng = mulberry32(seed);
+
+  const randomBytesPatch = (size: number, cb?: (err: Error | null, buf: Buffer) => void): Buffer => {
+    const buf = Buffer.alloc(size);
+    for (let i = 0; i < size; i++) buf[i] = Math.floor(rng() * 256);
+    if (cb) { queueMicrotask(() => cb(null, buf)); }
+    return buf;
+  };
+
+  const getRandomValuesPatch = <T extends ArrayBufferView | null>(typedArray: T): T => {
+    if (typedArray) {
+      const u8 = new Uint8Array(
+        (typedArray as unknown as { buffer: ArrayBuffer; byteOffset: number; byteLength: number }).buffer,
+        (typedArray as unknown as { byteOffset: number }).byteOffset,
+        (typedArray as unknown as { byteLength: number }).byteLength,
+      );
+      for (let i = 0; i < u8.length; i++) u8[i] = Math.floor(rng() * 256);
+    }
+    return typedArray;
+  };
+
+  const randomUUIDPatch = (): `${string}-${string}-${string}-${string}-${string}` =>
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.floor(rng() * 16);
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    }) as `${string}-${string}-${string}-${string}-${string}`;
+
+  Object.defineProperty(cryptoCjs, 'randomBytes', { value: randomBytesPatch, configurable: true });
+  Object.defineProperty(cryptoCjs, 'randomUUID',  { value: randomUUIDPatch,  configurable: true });
+
+  if (globalCrypto) {
+    if (typeof globalCrypto.randomUUID === 'function') {
+      Object.defineProperty(globalCrypto, 'randomUUID',      { value: randomUUIDPatch,      configurable: true });
+    }
+    if (typeof globalCrypto.getRandomValues === 'function') {
+      Object.defineProperty(globalCrypto, 'getRandomValues', { value: getRandomValuesPatch, configurable: true });
+    }
+  }
+
+  return {
+    origMathRandom,
+    origRandomBytes,
+    origRandomUUID,
+    origGlobalRandomUUID,
+    origGlobalGetRandomValues,
+  };
+}
+
 // ── installDeterminismPatches ─────────────────────────────────────────────────
 
 export interface DeterminismPatchHandle {
@@ -280,26 +376,37 @@ export interface DeterminismPatchHandle {
 /**
  * Patch global time + crypto primitives to be deterministic.
  * Must be called AFTER createEnv() so the VirtualClock is ready.
+ *
+ * If `earlyHandle` is provided (from a prior `installEarlyPrngPatches` call),
+ * the PRNG globals are re-initialised with fresh streams (so the scenario
+ * starts from a clean PRNG state) and the **real** originals from the handle
+ * are used for the restore() teardown.
+ *
  * Returns a handle whose restore() undoes every patch.
  */
-export function installDeterminismPatches(env: SimEnv): DeterminismPatchHandle {
+export function installDeterminismPatches(
+  env: SimEnv,
+  earlyHandle?: EarlyPrngPatchHandle,
+): DeterminismPatchHandle {
   // Capture the real setTimeout BEFORE the clock patch overwrites it.
   const realSetTimeout = globalThis.setTimeout.bind(globalThis);
 
-  const origRandomBytes = cryptoCjs.randomBytes;
-  const origRandomUUID  = cryptoCjs.randomUUID;
+  // Use the real originals from the early handle if available; otherwise
+  // capture them now (for callers that skip the early phase).
+  const origRandomBytes = earlyHandle?.origRandomBytes ?? cryptoCjs.randomBytes;
+  const origRandomUUID  = earlyHandle?.origRandomUUID  ?? cryptoCjs.randomUUID;
+  const origMathRandom  = earlyHandle?.origMathRandom  ?? Math.random;
 
   const globalCrypto = globalThis.crypto;
-  let origGlobalRandomUUID: typeof crypto.randomUUID | undefined;
-  if (globalCrypto?.randomUUID) origGlobalRandomUUID = globalCrypto.randomUUID.bind(globalCrypto);
-  let origGlobalGetRandomValues: typeof crypto.getRandomValues | undefined;
-  if (globalCrypto?.getRandomValues) origGlobalGetRandomValues = globalCrypto.getRandomValues.bind(globalCrypto);
+  const origGlobalRandomUUID = earlyHandle?.origGlobalRandomUUID
+    ?? (globalCrypto?.randomUUID ? globalCrypto.randomUUID.bind(globalCrypto) : undefined);
+  const origGlobalGetRandomValues = earlyHandle?.origGlobalGetRandomValues
+    ?? (globalCrypto?.getRandomValues ? globalCrypto.getRandomValues.bind(globalCrypto) : undefined);
 
+  // Fresh PRNG streams for the scenario runtime (independent of whatever
+  // the early patch consumed during module initialisation).
   const rng = mulberry32(env.seed);
 
-  // Patch Math.random with an independent sub-stream (XOR'd seed avoids
-  // correlation with the crypto PRNG stream above).
-  const origMathRandom = Math.random;
   const mathRng = mulberry32(env.seed ^ 0x6D617468);
   Math.random = () => mathRng();
 
