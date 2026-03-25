@@ -130,30 +130,37 @@ async function main(): Promise<void> {
   env.pump = async (ms: number, steps = 20): Promise<void> => {
     const step = ms / steps;
 
-    // Adaptive warm-up: yield to the real event loop until every in-flight
-    // HTTP request has been received, parsed by Express, and had its DB
-    // query enqueued in the scheduler — all at virtual-time 0.
-    //
-    // Guards:
-    //   MIN_YIELDS (30 ms)  — minimum real-time warm-up for TCP loopback.
-    //   pendingCount > 0    — don't exit while scheduler is still empty.
-    //   SETTLE (20 ms quiet)— catch the second request arriving after the first.
-    //   MAX (200 ms)        — hard cap to avoid infinite warm-up.
-    const MIN_YIELDS = 15;
-    const SETTLE     = 10;
-    const MAX        = 100;
-    let stable = 0;
-    let last   = env.scheduler.pendingCount;
-    for (let i = 0; i < MAX; i++) {
-      await new Promise<void>(r => patches.realSetTimeout(r, 2));
-      const cur = env.scheduler.pendingCount;
-      if (cur !== last) { stable = 0; last = cur; } else { stable++; }
-      if (i >= MIN_YIELDS && last > 0 && stable >= SETTLE) break;
-    }
+    // ── Freeze the write-time for VirtualSocket ──────────────────────
+    // All VirtualSocket._write calls during this pump will use the
+    // clock time at pump-start for computing `when` and op IDs.
+    // This is the KEY determinism guarantee: even if Express processes
+    // a request during a deliver() I/O yield (when the clock has already
+    // advanced internally), the write still lands at the correct frozen
+    // virtual time.  Without this, real-time jitter in Express processing
+    // causes the same request to land at virtual-time 0 in one run but
+    // virtual-time 25 in another — the root cause of non-determinism.
+    const pumpBase = env.clock.now();
+    env.scheduler.writeTimeOverride = pumpBase;
+    env.scheduler.holdDrain = true;
 
-    for (let i = 0; i < steps; i++) {
-      await new Promise<void>(r => patches.realSetTimeout(r, 1));
-      await env.clock.advance(step);
+    try {
+      // ── Phase 1: warm-up ──────────────────────────────────────────
+      // Yield to the REAL event loop so that in-flight supertest →
+      // Express → VirtualSocket processing can begin.  Not all requests
+      // need to finish here — writeTimeOverride guarantees correctness
+      // even if some arrive during Phase 2.
+      for (let i = 0; i < 50; i++) {
+        await new Promise<void>(r => patches.realSetTimeout(r, 2));
+      }
+
+      // ── Phase 2: advance the virtual clock in steps ───────────────
+      for (let i = 0; i < steps; i++) {
+        await new Promise<void>(r => patches.realSetTimeout(r, 1));
+        await env.clock.advance(step);
+      }
+    } finally {
+      env.scheduler.holdDrain = false;
+      env.scheduler.writeTimeOverride = undefined;
     }
   };
 

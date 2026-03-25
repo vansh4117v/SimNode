@@ -28,6 +28,25 @@ export class Scheduler {
   private _autoDrainScheduled = false;
   private _requestedTick: number | null = null;
 
+  /**
+   * When set, VirtualSocket._write uses this value instead of clock.now()
+   * for computing `when` and the op ID.  The pump sets this at pump-start
+   * so late-arriving writes still land at the correct virtual time.
+   */
+  writeTimeOverride?: number;
+
+  /**
+   * When true, requestRunTick() records the requested tick but does NOT
+   * schedule the microtask drain.  Ops accumulate in the pending queue
+   * until an explicit runTick() call (e.g. from clock.advance()) drains
+   * them together — ensuring the PRNG shuffle covers all concurrent I/O.
+   *
+   * The pump sets this during Phase 1 + Phase 2 so that real-event-loop
+   * jitter in Express/Mongoose processing cannot cause ops to be drained
+   * individually (which would bypass the deterministic shuffle).
+   */
+  holdDrain = false;
+
   constructor(opts: SchedulerOptions = {}) {
     this._clock = opts.clock;
     this._rng = mulberry32(opts.prngSeed ?? 0);
@@ -56,7 +75,7 @@ export class Scheduler {
       ? virtualTime
       : Math.max(this._requestedTick, virtualTime);
 
-    if (this._autoDrainScheduled) return;
+    if (this.holdDrain || this._autoDrainScheduled) return;
     this._autoDrainScheduled = true;
 
     queueMicrotask(() => {

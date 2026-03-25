@@ -13,6 +13,13 @@ export interface IClock {
 export interface IScheduler {
   enqueueCompletion(op: { id: string; when: number; run: () => Promise<void> | void }): void;
   requestRunTick?(virtualTime: number): void;
+  /**
+   * When set, VirtualSocket._write uses this value instead of clock.now()
+   * for computing `when` and the op ID.  The pump sets this to clock.now()
+   * at pump-start so that late-arriving writes (Express processed during a
+   * deliver() I/O yield) still land at the correct virtual time.
+   */
+  writeTimeOverride?: number;
 }
 
 /** A registered TCP mock handler. */

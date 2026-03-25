@@ -104,10 +104,10 @@ export class VirtualSocket extends Duplex {
     // neither scheduler nor clock is a misconfiguration: throw rather than
     // silently falling back to non-deterministic microtask delivery.
     if (this._scheduler) {
-      const now = this._clock?.now() ?? 0;
+      const now = this._scheduler.writeTimeOverride ?? this._clock?.now() ?? 0;
       const when = now + Math.max(0, latency);
       this._scheduler.enqueueCompletion({
-        id: `tcp-${this.id}-${now}-${bufHash(buf)}`,
+        id: `tcp-${this.remotePort}-${now}-${bufHash(buf)}-${buf.length}`,
         when,
         run: deliver,
       });
