@@ -1,6 +1,6 @@
 {
   "name": "crashlab",
-  "version": "0.1.10",
+  "version": "0.1.15",
   "license": "MIT",
   "keywords": [
     "crashlab",
@@ -36,10 +36,10 @@
     "build:pkg": "tsup && tsc --build tsconfig.json --force"
   },
   "dependencies": {
-    "@crashlab/core": "0.1.10",
-    "@crashlab/mongo": "0.1.10",
-    "@crashlab/pg-mock": "0.1.10",
-    "@crashlab/redis-mock": "0.1.10",
+    "@crashlab/core": "0.1.15",
+    "@crashlab/mongo": "0.1.15",
+    "@crashlab/pg-mock": "0.1.15",
+    "@crashlab/redis-mock": "0.1.15",
     "mongodb-memory-server": "^10.0.0"
   }
 }

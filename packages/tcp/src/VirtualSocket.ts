@@ -1,16 +1,7 @@
 import { Duplex } from 'node:stream';
 import type { TcpMockHandler, TcpMockConfig, IClock, IScheduler, TcpHandlerResult } from './types.js';
 
-let nextSocketId = 0;
 
-/** Fast non-cryptographic hash of a buffer used to make op IDs unique. */
-function bufHash(buf: Buffer): number {
-  let h = 5381;
-  for (let i = 0; i < buf.length; i++) {
-    h = ((h << 5) + h + buf[i]) >>> 0;
-  }
-  return h;
-}
 
 /**
  * In-memory duplex stream that replaces a real `net.Socket`.
@@ -38,9 +29,11 @@ export class VirtualSocket extends Duplex {
   private readonly _getLatency: () => number;
   private readonly _clock?: IClock;
   private readonly _scheduler?: IScheduler;
+  private _writeSeq = 0;
   private _connected = false;
 
   constructor(opts: {
+    id: number;
     host: string;
     port: number;
     config: TcpMockConfig;
@@ -50,7 +43,7 @@ export class VirtualSocket extends Duplex {
     getLatency?: () => number;
   }) {
     super({ allowHalfOpen: true });
-    this.id = nextSocketId++;
+    this.id = opts.id;
     this.remoteAddress = opts.host;
     this.remotePort = opts.port;
     this._handler = opts.config.handler;
@@ -104,10 +97,12 @@ export class VirtualSocket extends Duplex {
     // neither scheduler nor clock is a misconfiguration: throw rather than
     // silently falling back to non-deterministic microtask delivery.
     if (this._scheduler) {
+      const writeSeq = this._writeSeq++;
       const now = this._scheduler.writeTimeOverride ?? this._clock?.now() ?? 0;
       const when = now + Math.max(0, latency);
+      const opId = `tcp-${this.remotePort}-${this.id}-${writeSeq}-${now}`;
       this._scheduler.enqueueCompletion({
-        id: `tcp-${this.remotePort}-${now}-${bufHash(buf)}-${buf.length}`,
+        id: opId,
         when,
         run: deliver,
       });

@@ -41,11 +41,17 @@ function _applyScenarioEnv(filePath: string): void {
  * isolated database, and that env.mongo.drop() cleans up the correct one.
  */
 function _patchMongoDbName(dbName: string): void {
-  const re = /^(mongodb(?:\+srv)?:\/\/[^/]+\/)[^?#]*(.*)/i;
+  const re = /^(mongodb(?:\+srv)?:\/\/[^/?#]+)(?:\/([^?#]*))?(\\?[^#]*)?(#.*)?$/i;
   for (const [key, val] of Object.entries(process.env)) {
     if (!val) continue;
     const m = re.exec(val);
-    if (m) process.env[key] = m[1] + dbName + m[2];
+    if (!m) continue;
+
+    const base = m[1];
+    const query = m[3] ?? '';
+    const hash = m[4] ?? '';
+    const next = `${base}/${dbName}${query}${hash}`;
+    process.env[key] = next;
   }
 }
 
@@ -70,6 +76,52 @@ async function main(): Promise<void> {
   // Build a fresh env — MongoMock proxies to shared MongoMemoryServer,
   // RedisMock is fully in-memory (ioredis-mock, no external process).
   const env = await createEnv(seed, { mongoHost, mongoPort, mongoDbName });
+  const origFetch = globalThis.fetch;
+
+  const originalTcpMock = env.tcp.mock.bind(env.tcp);
+  env.tcp.mock = ((target: string, config: Parameters<typeof originalTcpMock>[1]) => {
+    const normalizedTarget = String(target).trim().toLowerCase();
+    const [targetHostRaw, targetPortRaw] = normalizedTarget.split(':');
+    const targetHost = targetHostRaw ?? 'localhost';
+    const targetPort = Number(targetPortRaw);
+    const tcpInternal = env.tcp as unknown as {
+      _mocks?: Map<string, { latency?: number }>;
+      _sockets?: Array<{ destroyed?: boolean; remoteAddress?: string; remotePort?: number }>;
+    };
+
+    const existing = tcpInternal._mocks?.get(normalizedTarget);
+    const existingLatency = existing?.latency ?? 0;
+    const requestedLatency = config.latency ?? 0;
+    const activeSocketCount = Number.isFinite(targetPort)
+      ? (tcpInternal._sockets ?? []).filter((socket) =>
+        !socket.destroyed &&
+        String(socket.remoteAddress ?? '').toLowerCase() === targetHost &&
+        socket.remotePort === targetPort,
+      ).length
+      : 0;
+
+    let effectiveConfig = config;
+    if (existing && activeSocketCount > 0 && existingLatency !== requestedLatency) {
+      effectiveConfig = { ...config, latency: existingLatency };
+    }
+
+    const now = env.clock.now();
+    const prevHoldDrain = env.scheduler.holdDrain;
+    env.scheduler.holdDrain = true;
+    try {
+      return originalTcpMock(target, effectiveConfig);
+    } finally {
+      queueMicrotask(() => {
+        const pumpOwnsHoldDrain = env.scheduler.writeTimeOverride !== undefined;
+        if (!pumpOwnsHoldDrain) {
+          env.scheduler.holdDrain = prevHoldDrain;
+        }
+        if (!env.scheduler.holdDrain) {
+          env.scheduler.requestRunTick(now);
+        }
+      });
+    }
+  }) as typeof env.tcp.mock;
 
   // Wire clock → scheduler so advance() drives all I/O completions
   env.clock.onTick = async (t: number) => {
@@ -81,6 +133,15 @@ async function main(): Promise<void> {
   // MongoDB driver session UUIDs, etc.) are deterministic.
   const earlyPrng = installEarlyPrngPatches(seed);
 
+  // Install network interceptors BEFORE scenario import so that top-level app
+  // side effects (e.g. creating DB clients / opening sockets during import)
+  // are captured by simulation and cannot escape to real network state.
+  env.http.install();
+  env.tcp.install();
+
+  // Patch globalThis.fetch before import for the same reason as HTTP/TCP.
+  if (origFetch) globalThis.fetch = createFetchPatch(env.http, origFetch) as typeof globalThis.fetch;
+
   // ── Load the scenario module BEFORE installing interceptors so that
   // import() (and all transitive require/fs reads) hit the real filesystem.
   // Pre-apply process.env assignments from the scenario source first so that
@@ -89,6 +150,10 @@ async function main(): Promise<void> {
   let scenarioFn: (env: SimEnv) => Promise<void>;
   if (scenarioPath) {
     _applyScenarioEnv(scenarioPath);
+    // Apply per-seed Mongo DB isolation BEFORE import() so any top-level
+    // module code that captures process.env Mongo URIs sees the isolated
+    // database name (not a shared external DB).
+    _patchMongoDbName(mongoDbName);
     let mod: { default?: (env: SimEnv) => Promise<void> };
     try {
       mod = await import(scenarioPath) as { default?: (env: SimEnv) => Promise<void> };
@@ -105,20 +170,14 @@ async function main(): Promise<void> {
     // Re-apply after import() in case the app called dotenv.config() at module
     // initialisation and overwrote the values we set above.
     _applyScenarioEnv(scenarioPath);
-    // Force all MongoDB URIs to use the per-seed isolated database so that
-    // env.mongo.drop() always cleans up the database the app actually used.
+    // Re-apply in case import-time code (e.g. dotenv.config()) overwrote env.
+    // This ensures env.mongo.drop() targets the same DB the app used.
     _patchMongoDbName(mongoDbName);
     scenarioFn = mod.default ?? (() => { throw new Error(`${scenarioPath} has no default export`); });
   }
 
-  // Install all interceptors on THIS thread's net/http/fs globals
-  env.http.install();
-  env.tcp.install();
+  // Install FS interceptor after import so module loading always uses real fs.
   env.fs.install();
-
-  // Patch globalThis.fetch to go through the HTTP interceptor (Shift 5)
-  const origFetch = globalThis.fetch;
-  if (origFetch) globalThis.fetch = createFetchPatch(env.http, origFetch) as typeof globalThis.fetch;
 
   // Apply determinism patches to THIS thread's globals
   const patches = installDeterminismPatches(env, earlyPrng);
@@ -184,7 +243,7 @@ async function main(): Promise<void> {
         clearInterval:  globalThis.clearInterval,
         setImmediate:   globalThis.setImmediate,
         clearImmediate: globalThis.clearImmediate,
-        fetch:          globalThis.fetch,  // patched fetch (Shift 5)
+        fetch:          globalThis.fetch,
         console,
         process,
         Buffer,

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { Simulation } from '../src/index.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('Simulation harness', () => {
   it('runs a passing scenario', async () => {
@@ -127,6 +130,199 @@ describe('Simulation harness', () => {
     const replayed = await sim.replay({ seed: 0, scenario: 'time skip' });
     expect(replayed.result.timeline).toContain('SKEW: 5000');
   }, 30_000);
+
+  it('applies per-seed Mongo URI patch before scenario import', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'simnode-scenario-'));
+    const scenarioPath = join(tempDir, 'mongo-capture.mjs');
+
+    writeFileSync(
+      scenarioPath,
+      [
+        "const CAPTURED = process.env.MONGODB_URI || '';",
+        'export default async function scenario(env) {',
+        "  env.timeline.record({ timestamp: 0, type: 'MONGO_URI', detail: CAPTURED });",
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const originalMongoUri = process.env.MONGODB_URI;
+    process.env.MONGODB_URI = 'mongodb://localhost:27017/shared_db';
+
+    try {
+      const sim = new Simulation({ seed: 0 });
+      sim.scenario('mongo import capture', scenarioPath);
+
+      const replayed = await sim.replay({ seed: 7, scenario: 'mongo import capture' });
+      expect(replayed.result.timeline).toContain('MONGO_URI: mongodb://localhost:27017/sim');
+    } finally {
+      if (originalMongoUri === undefined) delete process.env.MONGODB_URI;
+      else process.env.MONGODB_URI = originalMongoUri;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('intercepts top-level TCP side effects during scenario import', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'simnode-scenario-'));
+    const depPath = join(tempDir, 'top-level-net.mjs');
+    const scenarioPath = join(tempDir, 'scenario.mjs');
+
+    writeFileSync(
+      depPath,
+      [
+        "import net from 'node:net';",
+        "let errName = 'none';",
+        'try {',
+        "  net.createConnection(9999, 'unknown.host');",
+        '} catch (err) {',
+        "  errName = (err && typeof err === 'object' && 'name' in err) ? String(err.name) : String(err);",
+        '}',
+        'export default errName;',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    writeFileSync(
+      scenarioPath,
+      [
+        "import errName from './top-level-net.mjs';",
+        'export default async function scenario(env) {',
+        "  env.timeline.record({ timestamp: 0, type: 'TOP_LEVEL_NET', detail: errName });",
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    try {
+      const sim = new Simulation({ seed: 0 });
+      sim.scenario('import side effects are intercepted', scenarioPath);
+
+      const replayed = await sim.replay({ seed: 0, scenario: 'import side effects are intercepted' });
+      expect(replayed.result.timeline).toContain('TOP_LEVEL_NET: SimNodeUnmockedTCPConnectionError');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('patches Mongo URI without explicit /db path before scenario import', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'simnode-scenario-'));
+    const scenarioPath = join(tempDir, 'mongo-capture-nodb.mjs');
+
+    writeFileSync(
+      scenarioPath,
+      [
+        "const CAPTURED = process.env.MONGODB_URI || '';",
+        'export default async function scenario(env) {',
+        "  env.timeline.record({ timestamp: 0, type: 'MONGO_URI', detail: CAPTURED });",
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const originalMongoUri = process.env.MONGODB_URI;
+    process.env.MONGODB_URI = 'mongodb://localhost:27017?directConnection=true';
+
+    try {
+      const sim = new Simulation({ seed: 0 });
+      sim.scenario('mongo import capture no-db', scenarioPath);
+
+      const replayed = await sim.replay({ seed: 9, scenario: 'mongo import capture no-db' });
+      expect(replayed.result.timeline).toContain('MONGO_URI: mongodb://localhost:27017/sim_db_9');
+    } finally {
+      if (originalMongoUri === undefined) delete process.env.MONGODB_URI;
+      else process.env.MONGODB_URI = originalMongoUri;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('preserves holdDrain during pump when tcp.mock barrier exits', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'simnode-scenario-'));
+    const scenarioPath = join(tempDir, 'hold-drain-barrier.mjs');
+
+    writeFileSync(
+      scenarioPath,
+      [
+        'export default async function scenario(env) {',
+        '  env.tcp.mock("localhost:27017", {',
+        '    handler: env.mongo.createHandler(),',
+        '    latency: 50,',
+        '  });',
+        '',
+        '  const pumpPromise = env.pump(100, 4);',
+        '  await Promise.resolve();',
+        '  const duringPump = env.scheduler.holdDrain;',
+        '  env.timeline.record({',
+        '    timestamp: env.clock.now(),',
+        '    type: "HOLD_DRAIN",',
+        '    detail: String(duringPump),',
+        '  });',
+        '  await pumpPromise;',
+        '',
+        '  if (!duringPump) {',
+        '    throw new Error("holdDrain was clobbered during pump");',
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    try {
+      const sim = new Simulation({ seed: 0 });
+      sim.scenario('holdDrain barrier', scenarioPath);
+
+      const replayed = await sim.replay({ seed: 42, scenario: 'holdDrain barrier' });
+      expect(replayed.passed).toBe(true);
+      expect(replayed.result.timeline).toContain('HOLD_DRAIN: true');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+  
+  it('ignores remock latency change when active sockets already exist', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'simnode-scenario-'));
+    const scenarioPath = join(tempDir, 'remock-active-sockets.mjs');
+    
+    writeFileSync(
+      scenarioPath,
+      [
+        'import net from "node:net";',
+        'const connect = (port, host = "localhost") => new Promise((resolve, reject) => {',
+        '  const sock = net.createConnection(port, host);',
+        '  sock.once("connect", () => resolve(sock));',
+        '  sock.once("error", reject);',
+        '});',
+        '',
+        'export default async function scenario(env) {',
+        '  const sock = await connect(27017, "localhost");',
+        '  env.tcp.mock("localhost:27017", { handler: env.mongo.createHandler(), latency: 50 });',
+        '  const internal = env.tcp;',
+        '  const latency = internal._mocks.get("localhost:27017")?.latency ?? -1;',
+        '  env.timeline.record({ timestamp: env.clock.now(), type: "LATENCY", detail: String(latency) });',
+        '  sock.destroy();',
+        '  if (latency !== 0) throw new Error(`expected latency to remain 0, got ${latency}`);',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    
+    try {
+      const sim = new Simulation({ seed: 0 });
+      sim.scenario('remock active sockets keeps latency', scenarioPath);
+      
+      const replayed = await sim.replay({ seed: 42, scenario: 'remock active sockets keeps latency' });
+      expect(replayed.passed).toBe(true);
+      expect(replayed.result.timeline).toContain('LATENCY: 0');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
 });
 
 describe('Timeline', () => {

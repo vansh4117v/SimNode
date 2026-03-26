@@ -11,6 +11,7 @@ const _require = createRequire(import.meta.url);
 const netCjs = _require('node:net') as typeof net;
 const dnsCjs = _require('node:dns') as typeof dns;
 
+
 export interface TcpInterceptorOptions {
   clock?: IClock;
   scheduler?: IScheduler;
@@ -56,6 +57,8 @@ export class TcpInterceptor {
   private readonly _localServers: Map<number, net.Server> = new Map();
   /** Auto-incrementing socket ID for local server connections (offset to avoid collision with VirtualSocket IDs). */
   private _nextLocalSocketId = 100_000;
+  /** Auto-incrementing socket ID for client VirtualSockets. */
+  private _nextSocketId = 0;
 
   /** Keys that have ever been registered via mock() during this interceptor's lifetime. */
   private _everMockedKeys = new Set<string>();
@@ -87,6 +90,7 @@ export class TcpInterceptor {
     this._mocks.clear();
     this._everMockedKeys.clear();
     this._sockets.length = 0;
+    this._nextSocketId = 0;
     this._partitioned = false;
     this._extraLatency = 0;
     clearMockedHosts();
@@ -159,6 +163,7 @@ export class TcpInterceptor {
 
     const server = net.createServer((socket) => {
       const localSocketId = this._nextLocalSocketId++;
+      let localWriteSeq = 0;
       socket.on('data', (data: Buffer) => {
         const effectiveLatency = latency + extraLatencyRef();
         const deliver = async () => {
@@ -181,10 +186,11 @@ export class TcpInterceptor {
         };
 
         if (scheduler) {
+          const writeSeq = localWriteSeq++;
           const now = clock?.now() ?? 0;
           const when = now + Math.max(0, effectiveLatency);
-          const dataHash = (() => { let h = 5381; for (let i = 0; i < data.length; i++) h = ((h << 5) + h + data[i]) >>> 0; return h; })();
-          scheduler.enqueueCompletion({ id: `local-${port}-${now}-${dataHash}`, when, run: deliver });
+          const opId = `local-${port}-${localSocketId}-${writeSeq}-${now}`;
+          scheduler.enqueueCompletion({ id: opId, when, run: deliver });
           if (effectiveLatency <= 0) {
             scheduler.requestRunTick?.(now);
           }
@@ -433,6 +439,7 @@ export class TcpInterceptor {
     };
 
     const socket = new VirtualSocket({
+      id: this._nextSocketId++,
       host,
       port,
       config,

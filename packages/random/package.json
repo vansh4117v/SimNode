@@ -1,6 +1,6 @@
 {
   "name": "@crashlab/random",
-  "version": "0.1.10",
+  "version": "0.1.15",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.cjs",

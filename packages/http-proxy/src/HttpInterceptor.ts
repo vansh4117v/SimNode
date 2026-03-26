@@ -72,8 +72,14 @@ class FakeIncomingMessage extends EventEmitter {
 }
 
 class FakeClientRequest extends EventEmitter {
+  readonly id: number;
   private _chunks: Buffer[] = [];
   headersSent = false;
+
+  constructor(id: number) {
+    super();
+    this.id = id;
+  }
 
   write(chunk: string | Buffer): boolean {
     this._chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -176,6 +182,8 @@ export class HttpInterceptor {
   private readonly _allCalls: RecordedCall[] = [];
   private readonly _clock?: IClock;
   private readonly _scheduler?: IScheduler;
+  // Per-interceptor request sequence (used only for the FakeClientRequest.id field).
+  private _nextRequestId = 0;
 
   private _partitioned = false;
   private _defaultLatency = 0;
@@ -298,7 +306,7 @@ export class HttpInterceptor {
     callback?: (res: FakeIncomingMessage) => void,
   ): FakeClientRequest {
     const route = this._routes.find((r) => r.matches(url));
-    const fakeReq = new FakeClientRequest();
+    const fakeReq = new FakeClientRequest(this._nextRequestId++);
     if (callback) fakeReq.on('response', callback);
 
     fakeReq.on('_end', () => {

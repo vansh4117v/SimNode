@@ -273,6 +273,66 @@ describe('scheduler integration', () => {
     expect(run3).toContain('ALPHA');
     expect(run3).toContain('BETA');
   });
+
+  it('generates distinct scheduler op IDs for identical payloads on different sockets', async () => {
+    const clock = new VirtualClock(0);
+    const scheduler = new Scheduler({ prngSeed: 123 });
+
+    interceptor = new TcpInterceptor({ clock, scheduler });
+    interceptor.mock('localhost:5432', {
+      handler: (data) => Buffer.from(data),
+      latency: 10,
+    });
+    interceptor.install();
+
+    const ids: string[] = [];
+    const originalEnqueue = scheduler.enqueueCompletion.bind(scheduler);
+    scheduler.enqueueCompletion = (op) => {
+      ids.push(op.id);
+      originalEnqueue(op);
+    };
+
+    const sock1 = await connect(5432);
+    const sock2 = await connect(5432);
+
+    sock1.write('same-payload');
+    sock2.write('same-payload');
+
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toEqual(ids[1]);
+
+    sock1.destroy();
+    sock2.destroy();
+  });
+
+  it('generates distinct scheduler op IDs for repeated identical payloads on the same socket', async () => {
+    const clock = new VirtualClock(0);
+    const scheduler = new Scheduler({ prngSeed: 123 });
+
+    interceptor = new TcpInterceptor({ clock, scheduler });
+    interceptor.mock('localhost:5432', {
+      handler: (data) => Buffer.from(data),
+      latency: 10,
+    });
+    interceptor.install();
+
+    const ids: string[] = [];
+    const originalEnqueue = scheduler.enqueueCompletion.bind(scheduler);
+    scheduler.enqueueCompletion = (op) => {
+      ids.push(op.id);
+      originalEnqueue(op);
+    };
+
+    const sock = await connect(5432);
+
+    sock.write('same-payload');
+    sock.write('same-payload');
+
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toEqual(ids[1]);
+
+    sock.destroy();
+  });
 });
 
 // 4. Virtual latency with clock.advance()

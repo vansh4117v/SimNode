@@ -50,8 +50,10 @@ describe('deterministic ordering', () => {
       const sched = new Scheduler({ prngSeed: seed });
       const order: string[] = [];
 
-      sched.enqueueCompletion({ id: 'op1', when: 100, run: () => { order.push('op1'); } });
-      sched.enqueueCompletion({ id: 'op2', when: 100, run: () => { order.push('op2'); } });
+      const ids = ['op1', 'op2', 'op3', 'op4', 'op5', 'op6'];
+      for (const id of ids) {
+        sched.enqueueCompletion({ id, when: 100, run: () => { order.push(id); } });
+      }
 
       await sched.runTick(100);
       return order;
@@ -60,10 +62,9 @@ describe('deterministic ordering', () => {
     const orderA = await runWithSeed(42);
     const orderB = await runWithSeed(99);
 
-    // Expected with seed 42: ["op1", "op2"]
-    // Expected with seed 99: ["op2", "op1"]
-    expect(orderA).toEqual(['op1', 'op2']);
-    expect(orderB).toEqual(['op2', 'op1']);
+    expect(orderA).not.toEqual(orderB);
+    expect(orderA.slice().sort()).toEqual(['op1', 'op2', 'op3', 'op4', 'op5', 'op6']);
+    expect(orderB.slice().sort()).toEqual(['op1', 'op2', 'op3', 'op4', 'op5', 'op6']);
   });
 
   it('same seed always produces the same order', async () => {

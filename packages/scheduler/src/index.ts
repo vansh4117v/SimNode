@@ -1,5 +1,4 @@
 import type { IClock, PendingOp } from './types.js';
-import { mulberry32, shuffleInPlace } from './prng.js';
 
 export type { IClock, PendingOp } from './types.js';
 
@@ -22,10 +21,11 @@ export interface SchedulerOptions {
  */
 export class Scheduler {
   private _clock: IClock | undefined;
-  private readonly _rng: () => number;
+  private readonly _prngSeed: number;
   private readonly _pending: PendingOp[] = [];
   private _runChain: Promise<void> = Promise.resolve();
   private _autoDrainScheduled = false;
+  private _autoDrainDepth = 0;
   private _requestedTick: number | null = null;
 
   /**
@@ -49,7 +49,21 @@ export class Scheduler {
 
   constructor(opts: SchedulerOptions = {}) {
     this._clock = opts.clock;
-    this._rng = mulberry32(opts.prngSeed ?? 0);
+    this._prngSeed = opts.prngSeed ?? 0;
+  }
+
+  private _rankForOpId(id: string): number {
+    let h = 2166136261 ^ this._prngSeed;
+    for (let i = 0; i < id.length; i++) {
+      h ^= id.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    h ^= h >>> 16;
+    h = Math.imul(h, 2246822507);
+    h ^= h >>> 13;
+    h = Math.imul(h, 3266489909);
+    h ^= h >>> 16;
+    return h >>> 0;
   }
 
   // public API
@@ -83,9 +97,12 @@ export class Scheduler {
       const tick = this._requestedTick;
       this._requestedTick = null;
       if (tick == null) return;
+      this._autoDrainDepth++;
       void this.runTick(tick).catch(() => {
         // Errors still surface to explicit runTick callers; requestRunTick is
         // best-effort and must not throw asynchronously.
+      }).finally(() => {
+        this._autoDrainDepth--;
       });
       if (this._requestedTick != null) {
         this.requestRunTick(this._requestedTick);
@@ -104,10 +121,10 @@ export class Scheduler {
   }
 
   /**
-   * Collect all enqueued ops with `when <= virtualTime`, shuffle them
-   * deterministically via the seeded PRNG, then execute their `run()`
-   * callbacks **sequentially** in that shuffled order, awaiting one
-   * microtask checkpoint (`await Promise.resolve()`) between each.
+   * Collect all enqueued ops with `when <= virtualTime`, order them
+   * deterministically via a seed+id hash rank, then execute their `run()`
+   * callbacks **sequentially** in that order, awaiting one microtask
+   * checkpoint (`await Promise.resolve()`) between each.
    */
   async runTick(virtualTime: number): Promise<void> {
     const run = async (): Promise<void> => {
@@ -131,23 +148,23 @@ export class Scheduler {
         if (ready.length === 0) break;
 
         // 2. Stable-sort by `when` ascending so earlier ops run first,
-        //    then shuffle within each same-`when` group via PRNG.
+        //    then deterministically order each same-`when` group using
+        //    a seed+id rank that is independent of group size.
         ready.sort((a, b) => a.when - b.when);
 
-        // Group by `when` and shuffle each group.
+        // Group by `when` and rank each group deterministically.
         let i = 0;
         while (i < ready.length) {
           let j = i;
           while (j < ready.length && ready[j].when === ready[i].when) j++;
           if (j - i > 1) {
             const group = ready.slice(i, j);
-            // Sort by id first so the shuffle always starts from the same
-            // canonical order regardless of real-event-loop enqueue order.
-            // Without this, two ops enqueued as [A,B] vs [B,A] (due to
-            // non-deterministic real timing) would produce different shuffle
-            // outcomes for the same seed, breaking replay determinism.
-            group.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-            shuffleInPlace(group, this._rng);
+            group.sort((a, b) => {
+              const ra = this._rankForOpId(a.id);
+              const rb = this._rankForOpId(b.id);
+              if (ra !== rb) return ra - rb;
+              return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+            });
             for (let k = 0; k < group.length; k++) {
               ready[i + k] = group[k];
             }
@@ -156,7 +173,12 @@ export class Scheduler {
         }
 
         // 3. Execute sequentially, with a microtask boundary between each.
-        for (const op of ready) {
+        for (let index = 0; index < ready.length; index++) {
+          if (this._autoDrainDepth > 0 && this.holdDrain) {
+            this._pending.unshift(...ready.slice(index));
+            return;
+          }
+          const op = ready[index];
           await op.run();
           await Promise.resolve(); // microtask checkpoint
         }

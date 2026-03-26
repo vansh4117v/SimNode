@@ -1,14 +1,14 @@
-import { VirtualClock } from '@crashlab/clock';
-import { install as installClock } from '@crashlab/clock';
-import { SeededRandom, mulberry32 } from '@crashlab/random';
-import { Scheduler } from '@crashlab/scheduler';
-import { HttpInterceptor } from '@crashlab/http-proxy';
-import { TcpInterceptor } from '@crashlab/tcp';
-import { VirtualFS } from '@crashlab/filesystem';
-import { createRequire } from 'node:module';
+import { VirtualClock } from "@crashlab/clock";
+import { install as installClock } from "@crashlab/clock";
+import { SeededRandom, mulberry32 } from "@crashlab/random";
+import { Scheduler } from "@crashlab/scheduler";
+import { HttpInterceptor } from "@crashlab/http-proxy";
+import { TcpInterceptor } from "@crashlab/tcp";
+import { VirtualFS } from "@crashlab/filesystem";
+import { createRequire } from "node:module";
 
 const _require = createRequire(import.meta.url);
-const cryptoCjs = _require('node:crypto') as typeof import('node:crypto');
+const cryptoCjs = _require("node:crypto") as typeof import("node:crypto");
 
 // ── Timeline ─────────────────────────────────────────────────────────────────
 
@@ -20,10 +20,14 @@ export interface TimelineEvent {
 
 export class Timeline {
   private _events: TimelineEvent[] = [];
-  record(evt: TimelineEvent): void { this._events.push(evt); }
-  get events(): ReadonlyArray<TimelineEvent> { return this._events; }
+  record(evt: TimelineEvent): void {
+    this._events.push(evt);
+  }
+  get events(): ReadonlyArray<TimelineEvent> {
+    return this._events;
+  }
   toString(): string {
-    return this._events.map(e => `[${e.timestamp}ms] ${e.type}: ${e.detail}`).join('\n');
+    return this._events.map((e) => `[${e.timestamp}ms] ${e.type}: ${e.detail}`).join("\n");
   }
 }
 
@@ -36,19 +40,19 @@ export interface PgMockLike {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
   seedData(table: string, rows: Record<string, unknown>[]): void;
   ready(): Promise<void>;
-  createHandler(): import('@crashlab/tcp').TcpMockHandler;
+  createHandler(): import("@crashlab/tcp").TcpMockHandler;
 }
 
 export interface RedisMockLike {
   seedData(key: string, value: string): void;
   flush(): Promise<void>;
-  createHandler(): import('@crashlab/tcp').TcpMockHandler;
+  createHandler(): import("@crashlab/tcp").TcpMockHandler;
 }
 
 export interface MongoMockLike {
   find(collection: string, filter?: Record<string, unknown>): Promise<Record<string, unknown>[]>;
   drop(): Promise<void>;
-  createHandler(): import('@crashlab/tcp').TcpMockHandler;
+  createHandler(): import("@crashlab/tcp").TcpMockHandler;
 }
 
 // ── SimEnv ────────────────────────────────────────────────────────────────────
@@ -91,7 +95,7 @@ export class FaultInjector {
     this._env.tcp.blockAll(duration);
     this._env.timeline.record({
       timestamp: this._env.clock.now(),
-      type: 'FAULT',
+      type: "FAULT",
       detail: `Network partition for ${duration}ms`,
     });
   }
@@ -101,16 +105,16 @@ export class FaultInjector {
     this._env.http.setDefaultLatency(opts.latency);
     this._env.timeline.record({
       timestamp: this._env.clock.now(),
-      type: 'FAULT',
+      type: "FAULT",
       detail: `Slow DB: ${opts.latency}ms extra latency`,
     });
   }
 
-  diskFull(path = '/'): void {
-    this._env.fs.inject(path, { error: 'ENOSPC: no space left on device', code: 'ENOSPC' });
+  diskFull(path = "/"): void {
+    this._env.fs.inject(path, { error: "ENOSPC: no space left on device", code: "ENOSPC" });
     this._env.timeline.record({
       timestamp: this._env.clock.now(),
-      type: 'FAULT',
+      type: "FAULT",
       detail: `Disk full at ${path}`,
     });
   }
@@ -119,7 +123,7 @@ export class FaultInjector {
     this._env.clock.skew(amount);
     this._env.timeline.record({
       timestamp: this._env.clock.now(),
-      type: 'FAULT',
+      type: "FAULT",
       detail: `Clock skew +${amount}ms`,
     });
   }
@@ -134,7 +138,11 @@ export class FaultInjector {
       when: stopAt,
       run: async () => {
         server.stop?.();
-        this._env.timeline.record({ timestamp: stopAt, type: 'FAULT', detail: 'Process stop (restart)' });
+        this._env.timeline.record({
+          timestamp: stopAt,
+          type: "FAULT",
+          detail: "Process stop (restart)",
+        });
       },
     });
     this._env.scheduler.enqueueCompletion({
@@ -142,13 +150,17 @@ export class FaultInjector {
       when: startAt,
       run: async () => {
         server.start?.();
-        this._env.timeline.record({ timestamp: startAt, type: 'FAULT', detail: 'Process start (restart)' });
+        this._env.timeline.record({
+          timestamp: startAt,
+          type: "FAULT",
+          detail: "Process start (restart)",
+        });
       },
     });
 
     this._env.timeline.record({
       timestamp: now,
-      type: 'FAULT',
+      type: "FAULT",
       detail: `Process restart scheduled in ${delay}ms`,
     });
   }
@@ -166,16 +178,16 @@ export class FaultInjector {
 function _tryAddLocalServer(
   tcp: TcpInterceptor,
   port: number,
-  handler: import('@crashlab/tcp').TcpMockHandler,
+  handler: import("@crashlab/tcp").TcpMockHandler,
   timeline: Timeline,
 ): void {
   try {
     tcp.addLocalServer(port, handler, 0, (err) => {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'EADDRINUSE' || code === 'EACCES') {
+      if (code === "EADDRINUSE" || code === "EACCES") {
         timeline.record({
           timestamp: 0,
-          type: 'WARNING',
+          type: "WARNING",
           detail:
             `Port ${port} already in use (${code}) — out-of-process binaries ` +
             `(e.g. Prisma) may fail to connect, but in-process drivers ` +
@@ -220,50 +232,65 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
   let mongo: MongoMockLike | null = null;
 
   try {
-    const { PgMock } = await import('@crashlab/pg-mock');
+    const { PgMock } = await import("@crashlab/pg-mock");
     pg = new PgMock();
     // Ensure PGlite WASM is fully initialised BEFORE determinism patches
     // replace setTimeout — PGlite's init may use real timers internally.
     await (pg as { ready(): Promise<void> }).ready();
-  } catch { /* @crashlab/pg-mock not installed — pg stays null */ }
+  } catch {
+    /* @crashlab/pg-mock not installed — pg stays null */
+  }
 
   try {
-    const { RedisMock } = await import('@crashlab/redis-mock');
+    const { RedisMock } = await import("@crashlab/redis-mock");
     redis = new RedisMock();
-  } catch { /* @crashlab/redis-mock not installed — redis stays null */ }
+  } catch {
+    /* @crashlab/redis-mock not installed — redis stays null */
+  }
 
   try {
-    const { MongoMock } = await import('@crashlab/mongo');
+    const { MongoMock } = await import("@crashlab/mongo");
     mongo = new MongoMock(mongoOpts);
-  } catch { /* @crashlab/mongo not installed — mongo stays null */ }
+  } catch {
+    /* @crashlab/mongo not installed — mongo stays null */
+  }
 
   const env: SimEnv = {
-    seed, clock, random, scheduler,
-    http, tcp, fs,
-    pg, redis, mongo,
+    seed,
+    clock,
+    random,
+    scheduler,
+    http,
+    tcp,
+    fs,
+    pg,
+    redis,
+    mongo,
     faults: null as unknown as FaultInjector,
     timeline,
     // Placeholder — replaced by simulation-worker with a version that uses
     // the real (unpatched) setTimeout to yield to the host event loop.
-    pump: async (ms: number, _steps?: number) => { await clock.advance(ms); },
+    pump: async (ms: number, _steps?: number) => {
+      await clock.advance(ms);
+    },
   };
   env.faults = new FaultInjector(env);
 
   // Inject loopback URLs and register TCP routes only for installed mocks.
   if (pg) {
-    process.env.DATABASE_URL = 'postgres://localhost:5432/sim';
-    process.env.PGURL        = 'postgres://localhost:5432/sim';
-    tcp.mock('localhost:5432', { handler: pg.createHandler() });
+    process.env.DATABASE_URL = "postgres://localhost:5432/sim";
+    process.env.PGURL = "postgres://localhost:5432/sim";
+    tcp.mock("localhost:5432", { handler: pg.createHandler() });
     _tryAddLocalServer(tcp, 5432, pg.createHandler(), timeline);
   }
   if (redis) {
-    process.env.REDIS_URL = 'redis://localhost:6379';
-    tcp.mock('localhost:6379', { handler: redis.createHandler() });
+    process.env.REDIS_URL = "redis://localhost:6379";
+    tcp.mock("localhost:6379", { handler: redis.createHandler() });
     _tryAddLocalServer(tcp, 6379, redis.createHandler(), timeline);
   }
   if (mongo) {
-    process.env.MONGODB_URI = 'mongodb://localhost:27017/sim';
-    tcp.mock('localhost:27017', { handler: mongo.createHandler() });
+    process.env.MONGODB_URI = "mongodb://localhost:27017/sim";
+    tcp.mock("localhost:27017", { handler: mongo.createHandler() });
     _tryAddLocalServer(tcp, 27017, mongo.createHandler(), timeline);
   }
 
@@ -281,8 +308,8 @@ export async function createEnv(seed: number, mongoOpts?: MongoOpts): Promise<Si
  */
 export interface EarlyPrngPatchHandle {
   origMathRandom: typeof Math.random;
-  origRandomBytes: typeof import('node:crypto').randomBytes;
-  origRandomUUID: typeof import('node:crypto').randomUUID;
+  origRandomBytes: typeof import("node:crypto").randomBytes;
+  origRandomUUID: typeof import("node:crypto").randomUUID;
   origGlobalRandomUUID?: typeof crypto.randomUUID;
   origGlobalGetRandomValues?: typeof crypto.getRandomValues;
 }
@@ -304,32 +331,41 @@ export function installEarlyPrngPatches(seed: number): EarlyPrngPatchHandle {
   // Capture the REAL originals before any patching.
   const origMathRandom = Math.random;
   const origRandomBytes = cryptoCjs.randomBytes;
-  const origRandomUUID  = cryptoCjs.randomUUID;
+  const origRandomUUID = cryptoCjs.randomUUID;
 
   const globalCrypto = globalThis.crypto;
   const origGlobalRandomUUID = globalCrypto?.randomUUID
-    ? globalCrypto.randomUUID.bind(globalCrypto) : undefined;
+    ? globalCrypto.randomUUID.bind(globalCrypto)
+    : undefined;
   const origGlobalGetRandomValues = globalCrypto?.getRandomValues
-    ? globalCrypto.getRandomValues.bind(globalCrypto) : undefined;
+    ? globalCrypto.getRandomValues.bind(globalCrypto)
+    : undefined;
 
   // Independent sub-stream for Math.random (XOR'd seed avoids correlation).
-  const mathRng = mulberry32(seed ^ 0x6D617468);
+  const mathRng = mulberry32(seed ^ 0x6d617468);
   Math.random = () => mathRng();
 
   // Crypto PRNG stream.
   const rng = mulberry32(seed);
 
-  const randomBytesPatch = (size: number, cb?: (err: Error | null, buf: Buffer) => void): Buffer => {
+  const randomBytesPatch = (
+    size: number,
+    cb?: (err: Error | null, buf: Buffer) => void,
+  ): Buffer => {
     const buf = Buffer.alloc(size);
     for (let i = 0; i < size; i++) buf[i] = Math.floor(rng() * 256);
-    if (cb) { queueMicrotask(() => cb(null, buf)); }
+    if (cb) {
+      queueMicrotask(() => cb(null, buf));
+    }
     return buf;
   };
 
   const getRandomValuesPatch = <T extends ArrayBufferView | null>(typedArray: T): T => {
     if (typedArray) {
       const u8 = new Uint8Array(
-        (typedArray as unknown as { buffer: ArrayBuffer; byteOffset: number; byteLength: number }).buffer,
+        (
+          typedArray as unknown as { buffer: ArrayBuffer; byteOffset: number; byteLength: number }
+        ).buffer,
         (typedArray as unknown as { byteOffset: number }).byteOffset,
         (typedArray as unknown as { byteLength: number }).byteLength,
       );
@@ -339,21 +375,27 @@ export function installEarlyPrngPatches(seed: number): EarlyPrngPatchHandle {
   };
 
   const randomUUIDPatch = (): `${string}-${string}-${string}-${string}-${string}` =>
-    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
       const r = Math.floor(rng() * 16);
-      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     }) as `${string}-${string}-${string}-${string}-${string}`;
 
-  Object.defineProperty(cryptoCjs, 'randomBytes', { value: randomBytesPatch, configurable: true });
-  Object.defineProperty(cryptoCjs, 'randomUUID',  { value: randomUUIDPatch,  configurable: true });
+  Object.defineProperty(cryptoCjs, "randomBytes", { value: randomBytesPatch, configurable: true });
+  Object.defineProperty(cryptoCjs, "randomUUID", { value: randomUUIDPatch, configurable: true });
 
   if (globalCrypto) {
-    if (typeof globalCrypto.randomUUID === 'function') {
-      Object.defineProperty(globalCrypto, 'randomUUID',      { value: randomUUIDPatch,      configurable: true });
+    if (typeof globalCrypto.randomUUID === "function") {
+      Object.defineProperty(globalCrypto, "randomUUID", {
+        value: randomUUIDPatch,
+        configurable: true,
+      });
     }
-    if (typeof globalCrypto.getRandomValues === 'function') {
-      Object.defineProperty(globalCrypto, 'getRandomValues', { value: getRandomValuesPatch, configurable: true });
+    if (typeof globalCrypto.getRandomValues === "function") {
+      Object.defineProperty(globalCrypto, "getRandomValues", {
+        value: getRandomValuesPatch,
+        configurable: true,
+      });
     }
   }
 
@@ -394,33 +436,42 @@ export function installDeterminismPatches(
   // Use the real originals from the early handle if available; otherwise
   // capture them now (for callers that skip the early phase).
   const origRandomBytes = earlyHandle?.origRandomBytes ?? cryptoCjs.randomBytes;
-  const origRandomUUID  = earlyHandle?.origRandomUUID  ?? cryptoCjs.randomUUID;
-  const origMathRandom  = earlyHandle?.origMathRandom  ?? Math.random;
+  const origRandomUUID = earlyHandle?.origRandomUUID ?? cryptoCjs.randomUUID;
+  const origMathRandom = earlyHandle?.origMathRandom ?? Math.random;
 
   const globalCrypto = globalThis.crypto;
-  const origGlobalRandomUUID = earlyHandle?.origGlobalRandomUUID
-    ?? (globalCrypto?.randomUUID ? globalCrypto.randomUUID.bind(globalCrypto) : undefined);
-  const origGlobalGetRandomValues = earlyHandle?.origGlobalGetRandomValues
-    ?? (globalCrypto?.getRandomValues ? globalCrypto.getRandomValues.bind(globalCrypto) : undefined);
+  const origGlobalRandomUUID =
+    earlyHandle?.origGlobalRandomUUID ??
+    (globalCrypto?.randomUUID ? globalCrypto.randomUUID.bind(globalCrypto) : undefined);
+  const origGlobalGetRandomValues =
+    earlyHandle?.origGlobalGetRandomValues ??
+    (globalCrypto?.getRandomValues ? globalCrypto.getRandomValues.bind(globalCrypto) : undefined);
 
   // Fresh PRNG streams for the scenario runtime (independent of whatever
   // the early patch consumed during module initialisation).
   const rng = mulberry32(env.seed);
 
-  const mathRng = mulberry32(env.seed ^ 0x6D617468);
+  const mathRng = mulberry32(env.seed ^ 0x6d617468);
   Math.random = () => mathRng();
 
-  const randomBytesPatch = (size: number, cb?: (err: Error | null, buf: Buffer) => void): Buffer => {
+  const randomBytesPatch = (
+    size: number,
+    cb?: (err: Error | null, buf: Buffer) => void,
+  ): Buffer => {
     const buf = Buffer.alloc(size);
     for (let i = 0; i < size; i++) buf[i] = Math.floor(rng() * 256);
-    if (cb) { queueMicrotask(() => cb(null, buf)); }
+    if (cb) {
+      queueMicrotask(() => cb(null, buf));
+    }
     return buf;
   };
 
   const getRandomValuesPatch = <T extends ArrayBufferView | null>(typedArray: T): T => {
     if (typedArray) {
       const u8 = new Uint8Array(
-        (typedArray as unknown as { buffer: ArrayBuffer; byteOffset: number; byteLength: number }).buffer,
+        (
+          typedArray as unknown as { buffer: ArrayBuffer; byteOffset: number; byteLength: number }
+        ).buffer,
         (typedArray as unknown as { byteOffset: number }).byteOffset,
         (typedArray as unknown as { byteLength: number }).byteLength,
       );
@@ -430,21 +481,27 @@ export function installDeterminismPatches(
   };
 
   const randomUUIDPatch = (): `${string}-${string}-${string}-${string}-${string}` =>
-    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
       const r = Math.floor(rng() * 16);
-      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     }) as `${string}-${string}-${string}-${string}-${string}`;
 
-  Object.defineProperty(cryptoCjs, 'randomBytes', { value: randomBytesPatch, configurable: true });
-  Object.defineProperty(cryptoCjs, 'randomUUID',  { value: randomUUIDPatch,  configurable: true });
+  Object.defineProperty(cryptoCjs, "randomBytes", { value: randomBytesPatch, configurable: true });
+  Object.defineProperty(cryptoCjs, "randomUUID", { value: randomUUIDPatch, configurable: true });
 
   if (globalCrypto) {
-    if (typeof globalCrypto.randomUUID === 'function') {
-      Object.defineProperty(globalCrypto, 'randomUUID',      { value: randomUUIDPatch,      configurable: true });
+    if (typeof globalCrypto.randomUUID === "function") {
+      Object.defineProperty(globalCrypto, "randomUUID", {
+        value: randomUUIDPatch,
+        configurable: true,
+      });
     }
-    if (typeof globalCrypto.getRandomValues === 'function') {
-      Object.defineProperty(globalCrypto, 'getRandomValues', { value: getRandomValuesPatch, configurable: true });
+    if (typeof globalCrypto.getRandomValues === "function") {
+      Object.defineProperty(globalCrypto, "getRandomValues", {
+        value: getRandomValuesPatch,
+        configurable: true,
+      });
     }
   }
 
@@ -457,14 +514,17 @@ export function installDeterminismPatches(
     if (!prev) return [secs, nanos];
     let ds = secs - prev[0];
     let dn = nanos - prev[1];
-    if (dn < 0) { ds -= 1; dn += 1_000_000_000; }
+    if (dn < 0) {
+      ds -= 1;
+      dn += 1_000_000_000;
+    }
     return [ds, dn];
   }) as typeof process.hrtime;
   hrtimePatch.bigint = (): bigint => BigInt(env.clock.now()) * 1_000_000n;
   process.hrtime = hrtimePatch;
 
   const origPerfTimeOrigin = performance.timeOrigin;
-  Object.defineProperty(performance, 'timeOrigin', { value: 0, configurable: true });
+  Object.defineProperty(performance, "timeOrigin", { value: 0, configurable: true });
 
   const clockResult = installClock(env.clock, { patchNextTick: false });
 
@@ -474,15 +534,27 @@ export function installDeterminismPatches(
       clockResult.uninstall();
       Math.random = origMathRandom;
       process.hrtime = origHrtime;
-      Object.defineProperty(performance, 'timeOrigin', { value: origPerfTimeOrigin, configurable: true });
-      Object.defineProperty(cryptoCjs, 'randomBytes', { value: origRandomBytes, configurable: true });
-      Object.defineProperty(cryptoCjs, 'randomUUID',  { value: origRandomUUID,  configurable: true });
+      Object.defineProperty(performance, "timeOrigin", {
+        value: origPerfTimeOrigin,
+        configurable: true,
+      });
+      Object.defineProperty(cryptoCjs, "randomBytes", {
+        value: origRandomBytes,
+        configurable: true,
+      });
+      Object.defineProperty(cryptoCjs, "randomUUID", { value: origRandomUUID, configurable: true });
       if (globalCrypto) {
         if (origGlobalRandomUUID !== undefined) {
-          Object.defineProperty(globalCrypto, 'randomUUID',      { value: origGlobalRandomUUID,      configurable: true });
+          Object.defineProperty(globalCrypto, "randomUUID", {
+            value: origGlobalRandomUUID,
+            configurable: true,
+          });
         }
         if (origGlobalGetRandomValues !== undefined) {
-          Object.defineProperty(globalCrypto, 'getRandomValues', { value: origGlobalGetRandomValues, configurable: true });
+          Object.defineProperty(globalCrypto, "getRandomValues", {
+            value: origGlobalGetRandomValues,
+            configurable: true,
+          });
         }
       }
     },
