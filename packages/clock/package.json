@@ -1,6 +1,6 @@
 {
   "name": "@crashlab/clock",
-  "version": "0.1.15",
+  "version": "1.0.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.cjs",

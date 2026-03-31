@@ -1,5 +1,24 @@
 # @crashlab/core
 
+## 1.0.0
+
+### Major Changes
+
+- Release version 1.0.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @crashlab/clock@1.0.0
+  - @crashlab/filesystem@1.0.0
+  - @crashlab/http-proxy@1.0.0
+  - @crashlab/mongo@1.0.0
+  - @crashlab/pg-mock@1.0.0
+  - @crashlab/random@1.0.0
+  - @crashlab/redis-mock@1.0.0
+  - @crashlab/scheduler@1.0.0
+  - @crashlab/tcp@1.0.0
+
 ## 0.1.15
 
 ### Patch Changes

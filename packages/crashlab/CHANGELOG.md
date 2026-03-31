@@ -1,5 +1,19 @@
 # crashlab
 
+## 1.0.0
+
+### Major Changes
+
+- Release version 1.0.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @crashlab/core@1.0.0
+  - @crashlab/mongo@1.0.0
+  - @crashlab/pg-mock@1.0.0
+  - @crashlab/redis-mock@1.0.0
+
 ## 0.1.15
 
 ### Patch Changes

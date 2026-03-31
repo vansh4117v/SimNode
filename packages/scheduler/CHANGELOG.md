@@ -1,5 +1,11 @@
 # @crashlab/scheduler
 
+## 1.0.0
+
+### Major Changes
+
+- Release version 1.0.0
+
 ## 0.1.15
 
 ## 0.1.14

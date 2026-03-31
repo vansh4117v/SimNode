@@ -1,6 +1,6 @@
 {
   "name": "@crashlab/core",
-  "version": "0.1.15",
+  "version": "1.0.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.cjs",
@@ -30,17 +30,17 @@
     "build:pkg": "tsup && tsc --build tsconfig.json --force"
   },
   "dependencies": {
-    "@crashlab/clock": "0.1.15",
-    "@crashlab/filesystem": "0.1.15",
-    "@crashlab/http-proxy": "0.1.15",
-    "@crashlab/random": "0.1.15",
-    "@crashlab/scheduler": "0.1.15",
-    "@crashlab/tcp": "0.1.15"
+    "@crashlab/clock": "1.0.0",
+    "@crashlab/filesystem": "1.0.0",
+    "@crashlab/http-proxy": "1.0.0",
+    "@crashlab/random": "1.0.0",
+    "@crashlab/scheduler": "1.0.0",
+    "@crashlab/tcp": "1.0.0"
   },
   "peerDependencies": {
-    "@crashlab/mongo": ">=0.1.15",
-    "@crashlab/pg-mock": ">=0.1.15",
-    "@crashlab/redis-mock": ">=0.1.15",
+    "@crashlab/mongo": ">=1.0.0",
+    "@crashlab/pg-mock": ">=1.0.0",
+    "@crashlab/redis-mock": ">=1.0.0",
     "mongodb-memory-server": ">=10.0.0"
   },
   "peerDependenciesMeta": {
